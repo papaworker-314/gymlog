@@ -98,3 +98,14 @@ details summary { min-height: 44px; display: flex; align-items: center; cursor: 
 
 .drop { color: var(--muted, #888); font-weight: 600; }
 .quick .bigwu { font-weight: 700; }
+
+.lastline { margin: 2px 0 6px; font-size: 14px; }
+.nudge { display: flex; gap: 8px; margin-top: 6px; }
+.nudge button { flex: 1; font-size: 14px; padding: 6px 0; }
+.exmemo { display: block; font-size: 13px; margin: 0 0 4px; }
+.list button.item { flex-wrap: wrap; }
+.list button.item .exmemo { flex-basis: 100%; margin: 2px 0 0; }
+.exthumb { width: 36px; height: 36px; object-fit: cover; border-radius: 8px; margin-right: 8px; flex: 0 0 auto; }
+.zoomimg { display: block; width: 100%; max-height: 60vh; object-fit: contain; border-radius: 12px; }
+.photobtn { display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+.topbtns { display: flex; gap: 8px; }

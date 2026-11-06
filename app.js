@@ -20,6 +20,44 @@
     auth = new GL.LocalAuth(store, kv);
   }
 
+  // ---- exercise photos (optional server table; remote mode only). IndexedDB cache; any failure just means "no cache". ----
+  function idbCache() {
+    var dbp = null;
+    function open() {
+      if (dbp) return dbp;
+      dbp = new Promise(function (res, rej) {
+        if (!window.indexedDB) { rej(new Error('no idb')); return; }
+        var rq = indexedDB.open('gymlog-photos', 1);
+        rq.onupgradeneeded = function () { rq.result.createObjectStore('thumbs', { keyPath: 'exercise_id' }); };
+        rq.onsuccess = function () { res(rq.result); }; rq.onerror = function () { rej(rq.error); };
+      });
+      return dbp;
+    }
+    function tx(mode, fn) { return open().then(function (db) { return new Promise(function (res, rej) { var t = db.transaction('thumbs', mode), r = fn(t.objectStore('thumbs')); t.oncomplete = function () { res(r && r.result); }; t.onerror = t.onabort = function () { rej(t.error); }; }); }); }
+    return { all: function () { return tx('readonly', function (st) { return st.getAll(); }); }, put: function (rec) { return tx('readwrite', function (st) { return st.put(rec); }); } };
+  }
+  var photos = remote ? new GL.PhotoStore(client, idbCache()) : null;
+  function showPhotos() { try { return localStorage.getItem('gl:showphotos') !== '0'; } catch (e) { return true; } }
+  function photoUrl(exId) { return photos && showPhotos() ? photos.url(exId) : null; }
+  function loadImage(file) {
+    function viaImg() { return new Promise(function (res, rej) { var u = URL.createObjectURL(file), i = new Image(); i.onload = function () { URL.revokeObjectURL(u); res(i); }; i.onerror = function () { URL.revokeObjectURL(u); rej(new Error('decode')); }; i.src = u; }); }
+    return window.createImageBitmap ? createImageBitmap(file, { imageOrientation: 'from-image' }).catch(viaImg) : viaImg();
+  }
+  // resize on the phone (a 12 MP photo is 2-4 MB): longest edge <= 640 px, JPEG, shrunk further until it fits the server cap
+  function resizeToJpeg(file) {
+    return loadImage(file).then(function (img) {
+      var w = img.width || img.naturalWidth, h = img.height || img.naturalHeight, tries = [[640, 0.7], [640, 0.5], [480, 0.5], [480, 0.35]], out = null;
+      for (var i = 0; i < tries.length && !out; i++) {
+        var z = GL.fitSize(w, h, tries[i][0]), c = document.createElement('canvas'); c.width = z.w; c.height = z.h;
+        var g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, z.w, z.h); g.drawImage(img, 0, 0, z.w, z.h);
+        var url = c.toDataURL('image/jpeg', tries[i][1]); if (GL.validThumb(url)) out = url;
+      }
+      if (img.close) img.close();
+      if (!out) throw new Error('too big');
+      return out;
+    });
+  }
+
   var DAYS = ['일', '월', '화', '수', '목', '금', '토'];
   var COLORS = ['#e8590c', '#1c7ed6', '#2f9e44', '#ae3ec9', '#f08c00', '#0ca678'];
   var S = {
@@ -38,7 +76,7 @@
 
   // ---------------- read-only (another window holds the writer lease) ----------------
   var WRITE_ACTS = ['addset', 'same', 'copylast', 'paste', 'editset', 'saveset', 'delset', 'delblock', 'delday', 'confirmyes', 'addex', 'pick', 'newex', 'wu', 'ewu',
-    'addwu', 'madd', 'mrename', 'marchive', 'eadd', 'esave', 'earchive', 'doimport', 'undo', 'retryrejected', 'retry'];
+    'addwu', 'copyday', 'docopy', 'photodel', 'madd', 'mrename', 'marchive', 'eadd', 'esave', 'earchive', 'doimport', 'undo', 'retryrejected', 'retry'];
   function roNow() { return remote && !!auth.current() && !store.writer; }
   function applyRO() {
     var ro = roNow(), b = $('robanner'); if (b) b.hidden = !ro;
@@ -111,6 +149,13 @@
 
   // ---------------- views ----------------
   function badge(ex) { return '<span class="badge' + (ex.archived ? ' archived' : '') + '">' + esc(ex.body_part) + '</span>'; }
+  function memoHtml(ex, cls) { return ex.memo ? '<small class="exmemo muted ' + (cls || '') + '">' + esc(ex.memo) + '</small>' : ''; }
+  function bpChips(sel) { // body part chips (required when creating); only parts the server supports are offered
+    return '<div class="chips bpchips" id="bpchips">' + store.bodyParts().map(function (b) {
+      return '<button type="button" class="chip' + (b === sel ? ' on' : '') + '" data-act="bpsel" data-bp="' + esc(b) + '" aria-pressed="' + (b === sel) + '">' + esc(b) + '</button>';
+    }).join('') + '</div>';
+  }
+  function memoInput(id, val) { return store.supportsMemo() ? '<input id="' + id + '" maxlength="200" placeholder="메모 (예: 스미스 / 넓은 그립 / 가슴 중부)" autocomplete="off" value="' + esc(val || '') + '">' : ''; }
   function exName(ex) { return esc(ex.name) + (ex.archived ? ' <span class="muted">(보관됨)</span>' : ''); }
 
   function renderLogin() {
@@ -152,7 +197,8 @@
     return '<div id="robanner" class="banner"' + (roNow() ? '' : ' hidden') + '>다른 창에서 열려 있어요. 그 창을 닫거나 잠시 기다리면 여기서 이어서 쓸 수 있어요. (지금은 보기만 가능해요)</div>' +
       '<div id="offbanner" class="banner"' + (store.offline ? '' : ' hidden') + '>오프라인이에요. 저장된 기록으로 열었고, 새 기록은 연결되면 자동으로 올라가요.</div>' +
       '<div class="top"><div id="savestate" class="save ' + store.status + '"></div>' +
-      '<button data-act="gear" aria-label="설정">⚙ 설정</button></div>' +
+      '<div class="topbtns">' + (photos && (photos.available() || Object.keys(photos.recs).length) ? '<button data-act="eye" aria-label="사진 보기" aria-pressed="' + showPhotos() + '">' + (showPhotos() ? '👁' : '🚫') + '</button>' : '') +
+      '<button data-act="gear" aria-label="설정">⚙ 설정</button></div></div>' +
       (noChips ? '' : '<div class="chips" id="memberchips">' + members.map(function (m) {
         return '<button class="chip' + (m.id === S.view ? ' on' : '') + '" data-act="member" data-id="' + esc(m.id) + '">' + esc(m.name) + '</button>';
       }).join('') + '</div>');
@@ -163,6 +209,13 @@
   // rows saved before round 7 may still carry the old second weight: keep it visible (it has no meaning any more)
   function legacyHtml(s) { return s.weight2 !== null && s.weight2 !== undefined ? ' <span class="muted">(무게2 ' + esc(s.weight2) + ')</span>' : ''; }
 
+  // weight chips next to the weight field (+2.5 / +5 / -2.5); empty field starts from the last weight (store.nudgeBase)
+  function nudgeHtml(target, exId) {
+    return '<div class="nudge">' + [['+2.5', 2.5], ['+5', 5], ['-2.5', -2.5]].map(function (c) {
+      return '<button type="button" data-act="nudge" data-d="' + c[1] + '" data-target="' + target + '"' + (exId ? ' data-ex="' + esc(exId) + '"' : '') + ' aria-label="무게 ' + c[0] + '">' + c[0] + '</button>';
+    }).join('') + '</div>';
+  }
+
   function blockHtml(ex, sets) {
     var rows = sets.map(function (s, i) {
       return '<div class="setrow"><span class="idx">' + (i + 1) + '</span><button class="txt" data-act="editset" data-id="' + esc(s.id) + '">' +
@@ -170,15 +223,17 @@
         '<button class="ghost" data-act="editset" data-id="' + esc(s.id) + '" aria-label="수정">✎</button></div>';
     }).join('');
     var last = sets.length ? sets[sets.length - 1] : null;
-    var prevSess = store.lastSession(S.view, ex.id, S.date);
+    var prevSess = store.lastSession(S.view, ex.id, S.date), lastLine = store.lastLine(S.view, ex.id, S.date);
     var on = S.wu[ex.id] ? ' on' : '';
-    return '<div class="card" data-ex="' + esc(ex.id) + '"><div class="row"><h3 class="grow">' + exName(ex) + badge(ex) + '</h3>' +
-      '<button class="ghost danger" data-act="delblock" data-ex="' + esc(ex.id) + '" aria-label="운동 삭제">🗑</button></div>' + rows +
+    var pu = photoUrl(ex.id);
+    return '<div class="card" data-ex="' + esc(ex.id) + '"><div class="row">' + (pu ? '<img class="exthumb" src="' + pu + '" alt="" data-act="zoom" data-ex="' + esc(ex.id) + '">' : '') + '<h3 class="grow">' + exName(ex) + badge(ex) + '</h3>' +
+      '<button class="ghost danger" data-act="delblock" data-ex="' + esc(ex.id) + '" aria-label="운동 삭제">🗑</button></div>' + memoHtml(ex) +
+      (lastLine ? '<div class="lastline muted" data-last="' + esc(ex.id) + '">지난번 ' + esc(lastLine) + '</div>' : '') + rows +
       '<div class="entry"><button class="wu' + on + '" data-act="wu" data-ex="' + esc(ex.id) + '" aria-pressed="' + (!!S.wu[ex.id]) + '">웜업</button>' +
       '<input id="w-' + esc(ex.id) + '" inputmode="decimal" placeholder="무게" autocomplete="off">' +
       '<input id="d-' + esc(ex.id) + '" inputmode="text" placeholder="드롭 20,10 (선택)" autocomplete="off">' +
       '<input class="note" id="n-' + esc(ex.id) + '" placeholder="메모(선택)" autocomplete="off">' +
-      '<button class="primary add" data-act="addset" data-ex="' + esc(ex.id) + '">추가</button></div>' +
+      '<button class="primary add" data-act="addset" data-ex="' + esc(ex.id) + '">추가</button></div>' + nudgeHtml('w-' + ex.id, ex.id) +
       '<div class="quick"><button class="bigwu" data-act="addwu" data-ex="' + esc(ex.id) + '">웜업 추가</button>' +
       '<button data-act="same" data-ex="' + esc(ex.id) + '"' + (last ? '' : ' disabled') + '>이전 세트와 같게</button>' +
       '<button data-act="copylast" data-ex="' + esc(ex.id) + '"' + (prevSess.length ? '' : ' disabled') + '>지난 기록 복사' + (prevSess.length ? ' (' + prevSess.length + '세트)' : '') + '</button></div>' +
@@ -198,7 +253,8 @@
     drafts.forEach(function (id) { html += blockHtml(store.exercise(id), []); });
     blocks.forEach(function (b) { html += blockHtml(b.exercise, b.sets); });
     if (!blocks.length && !drafts.length) html += '<div class="empty">이 날 기록이 없어요. 운동을 추가해 보세요.</div>';
-    html += '<button class="primary" style="width:100%" data-act="addex">＋ 운동 추가</button>';
+    html += '<button class="primary" style="width:100%" data-act="addex">＋ 운동 추가</button>' +
+      '<button style="width:100%;margin-top:8px" data-act="copyday">다른 날/친구 기록 복사</button>';
     if (blocks.length) html += '<button class="ghost danger" style="width:100%;margin-top:8px" data-act="delday">이 날 기록 전체 삭제</button>';
     var days = store.historyDays(S.view).slice(0, 60);
     html += '<h2>지난 기록</h2>' + (days.length ? days.map(function (d) {
@@ -255,7 +311,7 @@
         series.filter(function (s) { return !s.dash; }).map(function (s) { return '<span><i style="background:' + s.color + '"></i>' + esc(s.name.replace(' 평균', '')) + '</span>'; }).join('') +
         (g.max ? '<span class="muted">점선 = 최대</span>' : '') + '</div></div>' + tables;
     } else {
-      html += '<div class="chips">' + GL.BODY_PARTS.map(function (b) { return '<button class="chip' + (g.bp === b ? ' on' : '') + '" data-act="gbp" data-bp="' + esc(b) + '">' + esc(b) + '</button>'; }).join('') + '</div>';
+      html += '<div class="chips">' + store.bodyParts().map(function (b) { return '<button class="chip' + (g.bp === b ? ' on' : '') + '" data-act="gbp" data-bp="' + esc(b) + '">' + esc(b) + '</button>'; }).join('') + '</div>';
       html += '<div class="chips">' + [7, 30, 90, 'all'].map(function (r) { return '<button class="chip' + (g.range === r ? ' on' : '') + '" data-act="grange" data-r="' + r + '">' + (r === 'all' ? '전체' : r + '일') + '</button>'; }).join('') + '</div>';
       html += '<select id="gmem" aria-label="멤버">' + memOpts + '</select><div class="opts">' + wuOpt + '</div>';
       var rows = store.bodyPartSummary(g.bp, { memberIds: memberIdsFor(g.mem), since: rangeOf(g.range).since, until: rangeOf(g.range).until, includeWarmup: g.wu });
@@ -281,7 +337,7 @@
   }
 
   // ---------------- sheets ----------------
-  function exerciseOptions(sel) { return GL.BODY_PARTS.map(function (b) { return '<option' + (b === sel ? ' selected' : '') + '>' + b + '</option>'; }).join(''); }
+  function exerciseOptions(sel) { return store.bodyParts().concat(store.bodyParts().indexOf(sel) < 0 && sel ? [sel] : []).map(function (b) { return '<option' + (b === sel ? ' selected' : '') + '>' + b + '</option>'; }).join(''); }
 
   function renderSheet() {
     var s = S.sheet;
@@ -296,15 +352,27 @@
       });
       var list = all.filter(function (e) { return !q || e.name.toLowerCase().indexOf(q) >= 0 || e.body_part.indexOf(q) >= 0; });
       h = '<h2>운동 선택</h2><input id="pq" placeholder="검색" value="' + esc(s.q || '') + '" autocomplete="off"><div class="list">' +
-        list.map(function (e) { return '<button class="item" data-act="pick" data-id="' + esc(e.id) + '"><span>' + esc(e.name) + '</span>' + badge(e) + '</button>'; }).join('') + '</div>' +
-        '<h2>새 운동</h2><div class="row"><input id="nxn" placeholder="운동 이름" value="' + esc(q && !list.length ? s.q : '') + '"><select id="nxb" style="width:90px">' + exerciseOptions('기타') + '</select></div>' +
+        list.map(function (e) { return '<button class="item" data-act="pick" data-id="' + esc(e.id) + '"><span>' + esc(e.name) + '</span>' + badge(e) + memoHtml(e, 'inpick') + '</button>'; }).join('') + '</div>' +
+        '<h2>새 운동</h2><input id="nxn" placeholder="운동 이름" value="' + esc(q && !list.length ? s.q : '') + '" autocomplete="off">' + bpChips(s.bp) + memoInput('nxm', '') +
         '<div class="err" id="serr"></div><button class="primary" style="width:100%" data-act="newex">만들고 선택</button><button style="width:100%;margin-top:8px" data-act="close">닫기</button>';
     } else if (s.type === 'editset') {
       var st = store.t.sets.get(s.id), ex = store.exercise(st.exercise_id);
       h = '<h2>' + exName(ex) + badge(ex) + '</h2><div class="entry" style="grid-template-columns:56px 1fr 1fr"><button class="wu' + (st.is_warmup ? ' on' : '') + '" id="ewu" data-act="ewu">웜업</button>' +
         '<input id="ew" inputmode="decimal" placeholder="무게" value="' + esc(st.weight === null ? '' : st.weight) + '"><input id="ed" inputmode="text" placeholder="드롭 20,10" value="' + esc(st.drops && st.drops.length ? st.drops.join(',') : '') + '">' +
-        '<input class="note" id="en" value="' + esc(st.note) + '" placeholder="메모"></div><div class="err" id="serr"></div>' +
+        '<input class="note" id="en" value="' + esc(st.note) + '" placeholder="메모"></div>' + nudgeHtml('ew', st.exercise_id) + '<div class="err" id="serr"></div>' +
         '<div class="row" style="margin-top:8px"><button class="primary grow" data-act="saveset">저장</button><button class="danger grow" data-act="delset">삭제</button><button class="grow" data-act="close">닫기</button></div>';
+    } else if (s.type === 'copyday') {
+      var src = GL.validDate(s.date) ? store.workoutFor(s.m, s.date) : null, blk = src ? store.blocksForWorkout(src.id).filter(function (b) { return !b.exercise.archived; }) : [];
+      var nsets = blk.reduce(function (n, b) { return n + b.sets.length; }, 0);
+      h = '<h2>다른 날/친구 기록 복사</h2><p class="muted">고른 날의 운동 목록을 ' + esc(dateLabel(S.date)) + '에 가져와요.</p>' +
+        '<select id="cdm" aria-label="멤버">' + store.members().map(function (m) { return '<option value="' + esc(m.id) + '"' + (m.id === s.m ? ' selected' : '') + '>' + esc(m.name) + (m.id === S.view ? ' (나)' : '') + '</option>'; }).join('') + '</select>' +
+        '<div style="height:8px"></div><input type="date" id="cdd" value="' + esc(s.date || '') + '">' +
+        '<div class="opts"><label><input type="checkbox" id="cdsets"' + (s.sets ? ' checked' : '') + '>세트(무게)도 함께 복사</label></div>' +
+        '<div class="muted" id="cdinfo">' + (blk.length ? esc(blk.map(function (b) { return b.exercise.name; }).join(', ')) + ' · 운동 ' + blk.length + ' · 세트 ' + nsets : '그 날은 기록이 없어요.') + '</div>' +
+        '<div class="err" id="serr"></div><div class="row" style="margin-top:8px"><button class="primary grow" data-act="docopy"' + (blk.length ? '' : ' disabled') + '>복사</button><button class="grow" data-act="close">닫기</button></div>';
+    } else if (s.type === 'zoom') {
+      var zex = store.exercise(s.ex), zu = photos && photos.url(s.ex);
+      h = '<h2>' + (zex ? exName(zex) : '') + '</h2>' + (zu ? '<img class="zoomimg" src="' + zu + '" alt="">' : '<p class="muted">사진이 없어요.</p>') + (zex ? memoHtml(zex) : '') + '<button style="width:100%;margin-top:8px" data-act="close">닫기</button>';
     } else if (s.type === 'confirm') {
       h = '<h2>' + esc(s.title) + '</h2><p class="muted">' + esc(s.body) + '</p><div class="row"><button class="danger grow" data-act="confirmyes">삭제</button><button class="grow" data-act="close">취소</button></div>';
     } else if (s.type === 'gear') {
@@ -323,8 +391,12 @@
       h = '<h2>운동 관리</h2><div class="list">' + store.exercises(true).map(function (e) {
         return '<div class="row" style="margin:6px 0;flex-wrap:wrap"><input class="grow" data-exname="' + esc(e.id) + '" value="' + esc(e.name) + '"' + (e.archived ? ' disabled' : '') + '>' +
           '<select data-exbp="' + esc(e.id) + '" style="width:84px"' + (e.archived ? ' disabled' : '') + '>' + exerciseOptions(e.body_part) + '</select>' +
+          (photos && photos.available() && !e.archived ? '<div class="row photorow" style="flex-basis:100%;margin-top:6px">' + (photos.url(e.id) ? '<img class="exthumb" src="' + photos.url(e.id) + '" alt="">' : '<span class="muted">사진 없음</span>') +
+            '<label class="btn photobtn">' + (photos.url(e.id) ? '사진 바꾸기' : '사진 추가') + '<input type="file" accept="image/*" data-exphoto="' + esc(e.id) + '" hidden></label>' +
+            (photos.url(e.id) ? '<button data-act="photodel" data-id="' + esc(e.id) + '">사진 삭제</button>' : '') + '</div>' : '') +
+          (store.supportsMemo() ? '<input style="flex-basis:100%;margin-top:6px" data-exmemo="' + esc(e.id) + '" maxlength="200" placeholder="메모 (그립 / 자극 부위 / 세팅)" value="' + esc(e.memo || '') + '"' + (e.archived ? ' disabled' : '') + '>' : '') +
           (e.archived ? '<button data-act="earchive" data-id="' + esc(e.id) + '" data-f="0">복원</button>' : '<button data-act="esave" data-id="' + esc(e.id) + '">저장</button><button class="danger" data-act="earchive" data-id="' + esc(e.id) + '" data-f="1">보관</button>') + '</div>';
-      }).join('') + '</div><h2>운동 추가</h2><div class="row"><input id="nxn" placeholder="운동 이름"><select id="nxb" style="width:90px">' + exerciseOptions('기타') + '</select></div>' +
+      }).join('') + '</div><h2>운동 추가</h2><input id="nxn" placeholder="운동 이름" autocomplete="off">' + bpChips(s.bp) + memoInput('nxm', '') +
         '<div class="err" id="serr">' + esc(s.err || '') + '</div><button class="primary" style="width:100%" data-act="eadd">추가</button><div class="row" style="margin-top:8px"><button class="grow" data-act="gear">뒤로</button><button class="grow" data-act="close">닫기</button></div>';
     } else if (s.type === 'import') {
       h = '<h2>백업 가져오기</h2><p class="muted">같은 항목은 덮어쓰고 나머지는 합칩니다. 형식이 틀리면 아무것도 바뀌지 않아요.</p>' +
@@ -336,6 +408,7 @@
   }
 
   // ---------------- actions ----------------
+  function markChips() { Array.prototype.forEach.call(document.querySelectorAll('#bpchips .chip'), function (c) { var on = c.getAttribute('data-bp') === (S.sheet && S.sheet.bp); c.classList.toggle('on', on); c.setAttribute('aria-pressed', on); }); }
   function setErr(id, msg) { var e = $(id); if (e) e.textContent = msg; }
   function guard(fn, errId) {
     try { return fn(); } catch (e) { setErr(errId || 'serr', humanError(e)); return undefined; }
@@ -343,6 +416,10 @@
   function humanError(e) {
     var m = String(e && e.message || e);
     if (/duplicate/.test(m)) return '같은 이름이 이미 있어요.';
+    if (/memo too long/.test(m)) return '메모는 200자까지 쓸 수 있어요.';
+    if (/invalid body_part/.test(m)) return '이 부위는 아직 쓸 수 없어요.';
+    if (/same day/.test(m)) return '같은 날 기록은 복사할 수 없어요.';
+    if (/nothing to copy/.test(m)) return '그 날은 복사할 기록이 없어요.';
     if (/empty name/.test(m)) return '이름을 입력해 주세요.';
     if (/invalid set/.test(m)) return '무게는 0 이상의 숫자로 입력해 주세요.';
     if (/import rejected/.test(m)) return '가져오기 실패: ' + m.replace('import rejected: ', '') + ' (아무것도 바뀌지 않았어요)';
@@ -372,7 +449,8 @@
     addex: function () { openSheet({ type: 'picker', q: '' }); },
     pick: function (d) { if (S.draft.indexOf(d.id) < 0) S.draft.push(d.id); closeSheet(); S.focus = 'w-' + d.id; render(); },
     newex: function () {
-      var made = guard(function () { return store.addExercise($('nxn').value, $('nxb').value); });
+      if (!S.sheet.bp) { setErr('serr', '부위를 골라 주세요.'); return; }
+      var made = guard(function () { return store.addExercise($('nxn').value, S.sheet.bp, $('nxm') ? $('nxm').value : ''); });
       if (!made) return;
       S.draft.push(made.id); closeSheet(); S.focus = 'w-' + made.id; changed();
     },
@@ -394,6 +472,26 @@
       var src = store.lastSession(S.view, d.ex, S.date); if (!src.length) return;
       addSets(d.ex, src.map(function (s) { return { weight: s.weight, drops: s.drops, note: s.note, is_warmup: s.is_warmup }; }));
       toast('지난 기록 ' + src.length + '세트를 복사했어요'); changed();
+    },
+    nudge: function (d) {
+      var inp = $(d.target); if (!inp) return;
+      inp.value = GL.nudge(inp.value, Number(d.d), d.ex ? store.nudgeBase(S.view, d.ex, S.date) : null);
+    },
+    copyday: function () {
+      var past = store.historyDays(S.view).filter(function (x) { return x.date < S.date; })[0];
+      openSheet({ type: 'copyday', m: S.view, date: past ? past.date : '', sets: true });
+    },
+    docopy: function () {
+      var s = S.sheet, res = guard(function () { return store.copyDay(s.m, s.date, S.view, S.date, { sets: !!s.sets }); });
+      if (!res) return;
+      if (s.sets) { toast(res.sets + '세트를 복사했어요', function () { store.undoCopy(res); }); }
+      else {
+        var w = store.workoutFor(S.view, S.date), have = {}; (w ? store.blocksForWorkout(w.id) : []).forEach(function (b) { have[b.exercise.id] = 1; });
+        var added = res.exerciseIds.filter(function (id) { return !have[id] && S.draft.indexOf(id) < 0; });
+        added.forEach(function (id) { S.draft.push(id); });
+        toast('운동 ' + added.length + '개를 가져왔어요', function () { S.draft = S.draft.filter(function (id) { return added.indexOf(id) < 0; }); render(); });
+      }
+      closeSheet(); changed();
     },
     paste: function (d) {
       var r = GL.parseLines($('p-' + d.ex).value);
@@ -440,10 +538,22 @@
       var tok = store.archiveMember(d.id, d.f === '1'); if (d.f === '1') undoToast('멤버를 보관했어요', tok);
       openSheet({ type: 'members' }); changed();
     },
-    eadd: function () { var ok = guard(function () { store.addExercise($('nxn').value, $('nxb').value); return true; }); if (ok) { openSheet({ type: 'exercises' }); changed(); } },
+    eye: function () { try { localStorage.setItem('gl:showphotos', showPhotos() ? '0' : '1'); } catch (e) { /* private mode: toggle just does not stick */ } render(); },
+    zoom: function (d) { openSheet({ type: 'zoom', ex: d.ex }); },
+    photodel: function (d) {
+      photos.remove(d.id).then(function () { toast('사진을 지웠어요'); if (S.sheet && S.sheet.type === 'exercises') renderSheet(); render(); })
+        .catch(function () { toast('사진을 지우지 못했어요. 연결을 확인하고 다시 해 주세요.'); });
+    },
+    bpsel: function (d) { S.sheet.bp = d.bp; S.sheet.bpPicked = true; markChips(); },
+    eadd: function () {
+      if (!S.sheet.bp) { setErr('serr', '부위를 골라 주세요.'); return; }
+      var ok = guard(function () { store.addExercise($('nxn').value, S.sheet.bp, $('nxm') ? $('nxm').value : ''); return true; });
+      if (ok) { openSheet({ type: 'exercises' }); changed(); }
+    },
     esave: function (d) {
       var n = document.querySelector('[data-exname="' + d.id + '"]').value, b = document.querySelector('[data-exbp="' + d.id + '"]').value;
-      var ok = guard(function () { store.updateExercise(d.id, { name: n, body_part: b }); return true; });
+      var mi = document.querySelector('[data-exmemo="' + d.id + '"]'), patch = { name: n, body_part: b }; if (mi) patch.memo = mi.value;
+      var ok = guard(function () { store.updateExercise(d.id, patch); return true; });
       if (ok) { openSheet({ type: 'exercises' }); changed(); }
     },
     earchive: function (d) { var tok = store.archiveExercise(d.id, d.f === '1'); if (d.f === '1') undoToast('운동을 보관했어요 (기록은 그대로 남아요)', tok); openSheet({ type: 'exercises' }); changed(); },
@@ -494,7 +604,7 @@
     ev.preventDefault();
     if (form === 'login') {
       var btn = ev.target.querySelector('button.primary'); if (btn) btn.disabled = true;
-      auth.login($('lname').value, $('lpin').value).then(function (m) { S.view = m.id; S.loginErr = ''; render(); kick(); })
+      auth.login($('lname').value, $('lpin').value).then(function (m) { S.view = m.id; S.loginErr = ''; render(); kick(); if (photos) photos.init().then(function () { render(); syncPhotos(); }); })
         .catch(function (e) { S.loginErr = loginErrorText(e); setErr('lerr', S.loginErr); if (btn) btn.disabled = false; });
     } else if (form === 'firstmember') {
       var ok = guard(function () { store.addMember($('fname').value); return true; }, 'lerr');
@@ -502,11 +612,28 @@
     }
   });
   document.addEventListener('input', function (ev) {
+    if (ev.target.id === 'nxn' && S.sheet && !S.sheet.bpPicked) { // hint only: the user's own tap always wins
+      var sug = GL.suggestBodyPart(ev.target.value); if (sug && store.bodyParts().indexOf(sug) >= 0) { S.sheet.bp = sug; markChips(); }
+    }
     if (ev.target.id === 'pq' && S.sheet) { S.sheet.q = ev.target.value; var pos = ev.target.selectionStart; renderSheet(); var n = $('pq'); n.focus(); n.setSelectionRange(pos, pos); }
   });
   document.addEventListener('change', function (ev) {
     var id = ev.target.id;
-    if (id === 'datein') { if (ev.target.value) { S.date = ev.target.value; S.draft = []; render(); } }
+    if (ev.target.hasAttribute && ev.target.hasAttribute('data-exphoto')) {
+      var inp = ev.target, exId = inp.getAttribute('data-exphoto'), f = inp.files && inp.files[0];
+      if (!f) return;
+      if (roNow()) { toast('다른 창에서 열려 있어서 지금은 보기만 가능해요.'); inp.value = ''; return; }
+      resizeToJpeg(f).then(function (thumb) {
+        return photos.set(exId, thumb).then(function () { toast('사진을 저장했어요'); if (S.sheet && S.sheet.type === 'exercises') renderSheet(); render(); },
+          function () { toast('사진을 올리지 못했어요. 연결을 확인하고 다시 해 주세요. (기록에는 영향이 없어요)'); });
+      }, function () { toast('이 사진은 읽을 수 없어요. 다른 사진을 골라 주세요.'); });
+      inp.value = '';
+      return;
+    }
+    if (id === 'cdm' || id === 'cdd' || id === 'cdsets') {
+      if (S.sheet && S.sheet.type === 'copyday') { S.sheet.m = $('cdm').value; S.sheet.date = $('cdd').value; S.sheet.sets = $('cdsets').checked; renderSheet(); }
+    }
+    else if (id === 'datein') { if (ev.target.value) { S.date = ev.target.value; S.draft = []; render(); } }
     else if (id === 'gex') { S.g.exId = ev.target.value; render(); }
     else if (id === 'gmem') { S.g.mem = ev.target.value; render(); }
     else if (id === 'gwu') { S.g.wu = ev.target.checked; render(); }
@@ -525,8 +652,17 @@
 
   // friends' new entries appear when the app is reopened / refocused (no realtime)
   var refreshing = false;
+  function syncPhotos() {
+    if (!photos) return;
+    var was = photos.state;
+    photos.sync().then(function (ch) {
+      var a = document.activeElement, typing = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+      if ((ch || was !== photos.state) && !S.sheet && !typing && auth.current()) render();
+    });
+  }
   function refreshNow() {
     if (!remote || refreshing || !auth.current()) return;
+    syncPhotos();
     refreshing = true;
     store.refresh().then(function (changed) {
       var a = document.activeElement, typing = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
@@ -548,6 +684,7 @@
       if (!remote) store.seedExercisesIfFirstRun();
       var me = auth.current(); if (me) S.view = me.id;
       render(); kick();
+      if (photos && me) photos.init().then(function () { render(); syncPhotos(); });
     }).catch(function (e) {
       if (e && e.code === 'AUTH') { S.loginErr = '로그인이 만료됐어요. 다시 로그인해 주세요.'; render(); }
       else renderLoadError(e);

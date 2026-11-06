@@ -7,7 +7,8 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var BODY_PARTS = ['이두', '삼두', '복근', '어깨', '등', '하체', '기타'];
+  var BODY_PARTS = ['이두', '삼두', '가슴', '어깨', '등', '복근', '하체', '기타']; // 가슴 needs migration-002 on the server (see Store.supportsChest)
+  var MEMO_MAX = 200;
   var SEED_EXERCISES = [
     { name: '트라이셉스벤치프레스', body_part: '삼두' },
     { name: 'W바', body_part: '이두' },
@@ -27,6 +28,8 @@
   //   (a,b) right after a number  = DROPS: weight reduced without rest, continuing the SAME set: 25(20,10)
   //   a trailing dash (`7.5 -`)   = just that one set (the empty token is ignored)
   // ------------------------------------------------------------------
+  var MAX_NUM = 100000; // explicit domain limit for weights/drops (rejects absurd or non-finite digit strings)
+  function okNum(n) { return typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= MAX_NUM; }
   var NUM = '(\\d+(?:\\.\\d+)?)';
   var WARMUP_WORDS = ['웜업', '웝업', '워밍업', '워업'];
   var WARM_RE = new RegExp('^(' + WARMUP_WORDS.join('|') + ')(?:\\s+' + NUM + ')?$');
@@ -39,10 +42,14 @@
     var sets = [];
     for (var i = 0; i < tokens.length; i++) {
       var tk = tokens[i], m = WARM_RE.exec(tk);
-      if (m) { sets.push({ is_warmup: true, weight: m[2] === undefined ? null : Number(m[2]), drops: null, note: '' }); continue; }
+      if (m) {
+        if (m[2] !== undefined && !okNum(Number(m[2]))) return { ok: false, error: 'number out of range "' + tk.slice(0, 20) + '"' };
+        sets.push({ is_warmup: true, weight: m[2] === undefined ? null : Number(m[2]), drops: null, note: '' }); continue;
+      }
       m = WORK_RE.exec(tk);
       if (m) {
         var drops = m[2] === undefined ? null : m[2].split(',').map(function (d) { return Number(d.trim()); });
+        if (!okNum(Number(m[1])) || (drops && !drops.every(okNum))) return { ok: false, error: 'number out of range "' + tk.slice(0, 20) + '"' };
         sets.push({ is_warmup: false, weight: Number(m[1]), drops: drops, note: '' }); continue;
       }
       return { ok: false, error: (/^[^\d()\-,.\s]+$/.test(tk) ? 'unknown word "' + tk + '"' : 'cannot read "' + tk + '"') };
@@ -61,9 +68,7 @@
     return { ok: ok, errors: errors };
   }
 
-  function fmtNum(n) {
-    return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
-  }
+  function fmtNum(n) { return String(n); } // exact: never rounds away precision the parser accepted (domain is capped by MAX_NUM)
 
   // one set in the memo format: `웜업`, `웜업 40`, `60`, `25(20,10)`
   function formatSet(s) {
@@ -74,6 +79,12 @@
     return out;
   }
   function formatSets(list) { return list.map(formatSet).join(' - '); }
+  // weight chips (+2.5/+5/-2.5): `cur` is the field text; empty/unreadable -> `fallback` (or 0). Never below 0 or above MAX_NUM.
+  function nudge(cur, delta, fallback) {
+    var t = String(cur === undefined || cur === null ? '' : cur).trim(), base = /^\d+(\.\d+)?$/.test(t) ? Number(t) : (fallback === null || fallback === undefined ? 0 : Number(fallback));
+    var v = Math.round((base + delta) * 1000) / 1000;
+    return fmtNum(Math.min(MAX_NUM, Math.max(0, v)));
+  }
 
   // Validates structured form fields (UI form). Returns {ok,value}|{ok:false,error}.
   // A working set needs a weight; a warm-up may have none. drops: comma text or an array of numbers >= 0.
@@ -85,7 +96,7 @@
       return Number(s);
     }
     var warm = !!f.is_warmup, w = num(f.weight);
-    if (w !== null && !Number.isFinite(w)) return { ok: false, error: 'weight' };
+    if (w !== null && !okNum(w)) return { ok: false, error: 'weight' };
     if (w === null && !warm) return { ok: false, error: 'weight' };
     var drops = null;
     if (Array.isArray(f.drops) || (f.drops !== null && f.drops !== undefined && String(f.drops).trim() !== '')) {
@@ -94,9 +105,11 @@
       for (var i = 0; i < parts.length; i++) {
         var raw = typeof parts[i] === 'number' ? String(parts[i]) : String(parts[i]).trim().replace(',', '.');
         if (!/^\d+(\.\d+)?$/.test(raw)) return { ok: false, error: 'drops' };
+        if (!okNum(Number(raw))) return { ok: false, error: 'drops' };
         drops.push(Number(raw));
       }
       if (!drops.length) drops = null;
+      if (drops && warm) return { ok: false, error: 'drops' }; // drops belong to working sets
     }
     return { ok: true, value: { is_warmup: warm, weight: w, drops: drops, note: String(f.note || '').trim() } };
   }
@@ -182,7 +195,7 @@
   var TOK_KEY = 'gl:auth'; // {access_token, refresh_token, expires_at(sec)}. The PIN is never stored.
   var COLS = { // exact server columns (schema is fixed); anything else (e.g. local updated_by) is dropped
     members: ['id', 'name', 'archived'],
-    exercises: ['id', 'name', 'body_part', 'archived'],
+    exercises: ['id', 'name', 'body_part', 'archived', 'memo'], // memo exists only after migration-002: it is sent only when set/changed, and only if the server rows carry it
     workouts: ['id', 'member_id', 'date', 'note', 'deleted'],
     sets: ['id', 'workout_id', 'exercise_id', 'position', 'is_warmup', 'weight', 'drops', 'note', 'deleted', 'updated_at']
   };
@@ -275,7 +288,7 @@
   // Pages with Range headers; follows Content-Range so a server page cap below 1000 still loads everything.
   SupabaseAdapter.prototype.list = async function (table) {
     var PAGE = 1000, from = 0, out = [];
-    var filter = (table === 'workouts' || table === 'sets') ? '&deleted=eq.false' : '';
+    var filter = table === 'sets' ? '&deleted=eq.false' : ''; // workouts: deleted days are loaded too, so re-opening one is an explicit revive (PATCH), never a creation
     for (;;) {
       var r = await this.c.rest('GET', '/rest/v1/' + table + '?select=*&order=id.asc' + filter,
         { headers: { 'Range-Unit': 'items', Range: from + '-' + (from + PAGE - 1), Prefer: 'count=exact' } });
@@ -301,7 +314,7 @@
   // `changed` = columns the user changed on an EXISTING row: only those are PATCHed (never a whole-row overwrite, never
   // `deleted:false` unless that is the change). null = brand-new row -> full upsert. If the PATCH matches no row on the
   // server (it only ever existed offline) fall through to the upsert so FK order and history stay intact.
-  SupabaseAdapter.prototype.put = async function (table, row, changed) {
+  SupabaseAdapter.prototype.put = async function (table, row, changed, extra) {
     if (!COLS[table]) throw new Error('unknown table ' + table);
     var J = { 'Content-Type': 'application/json' };
     function fail(r) { return codeErr('HTTP', 'write ' + table + ' failed: HTTP ' + r.status, { status: r.status, permanent: isPermanent(r.status) }); }
@@ -316,11 +329,90 @@
       if (Array.isArray(hit) && hit.length) return;
     }
     var r = await this.c.rest('POST', '/rest/v1/' + table + '?on_conflict=id',
-      { headers: Object.assign({ Prefer: 'resolution=merge-duplicates,return=minimal' }, J), body: JSON.stringify(newRowBody(table, row)) });
+      { headers: Object.assign({ Prefer: 'resolution=ignore-duplicates,return=minimal' }, J), body: JSON.stringify(newRowBody(table, row)) }); // creation is INSERT-ONLY: it can never overwrite an existing row
     if (!r.ok) throw fail(r);
+    if (!changed && extra && extra.length) { // columns edited while the creation was still pending (the insert may have been ignored or may have carried them)
+      var only2 = {}; extra.forEach(function (c) { only2[c] = row[c]; });
+      var patch2 = pickCols(table, only2);
+      if (Object.keys(patch2).length) {
+        var er = await this.c.rest('PATCH', '/rest/v1/' + table + '?id=eq.' + encodeURIComponent(row.id), { headers: Object.assign({ Prefer: 'return=minimal' }, J), body: JSON.stringify(patch2) });
+        if (!er.ok) throw fail(er);
+      }
+    }
   };
   // The server has no DELETE privilege; never attempt a remote wipe.
   SupabaseAdapter.prototype.clear = function () { return Promise.reject(new Error('remote wipe is not supported')); };
+
+  // ------------------------------------------------------------------
+  // Exercise photos (migration-003, OPTIONAL): a separate table exercise_photos(exercise_id pk, thumb data-URL, updated_at, removed).
+  // Deliberately NOT part of Store/outbox/snapshot: a missing table, a failed upload or a full cache can never touch logging data.
+  // state: 'unknown' (not asked yet / network trouble) | 'ok' | 'off' (table missing or not granted -> feature hidden, no errors).
+  // ------------------------------------------------------------------
+  var PHOTO_MAX_CHARS = 150000, PHOTO_PREFIX = 'data:image/jpeg;base64,';
+  function fitSize(w, h, max) {
+    w = Number(w); h = Number(h);
+    if (!(w > 0 && h > 0)) throw new Error('bad image size');
+    var k = Math.min(1, max / Math.max(w, h));
+    return { w: Math.max(1, Math.round(w * k)), h: Math.max(1, Math.round(h * k)) };
+  }
+  function validThumb(t) { return typeof t === 'string' && t.indexOf(PHOTO_PREFIX) === 0 && t.length > PHOTO_PREFIX.length && t.length <= PHOTO_MAX_CHARS; }
+  function MemCache() { this.m = {}; }
+  MemCache.prototype.all = function () { var self = this; return Promise.resolve(Object.keys(this.m).map(function (k) { return self.m[k]; })); };
+  MemCache.prototype.put = function (rec) { this.m[rec.exercise_id] = rec; return Promise.resolve(); };
+  function PhotoStore(client, cache) { this.c = client; this.cache = cache || new MemCache(); this.state = 'unknown'; this.recs = {}; this.ready = null; }
+  PhotoStore.prototype.init = function () { // show what is cached at once (also offline); a broken cache is just an empty cache
+    var self = this;
+    this.ready = this.ready || Promise.resolve().then(function () { return self.cache.all(); }).then(function (list) { (list || []).forEach(function (r) { if (r && r.exercise_id) self.recs[r.exercise_id] = r; }); }, function () { /* cache unavailable */ });
+    return this.ready;
+  };
+  PhotoStore.prototype.url = function (exId) { var r = this.recs[exId]; return r && !r.removed && validThumb(r.thumb) ? r.thumb : null; };
+  PhotoStore.prototype.available = function () { return this.state === 'ok'; };
+  PhotoStore.prototype._keep = function (rec) { this.recs[rec.exercise_id] = rec; return Promise.resolve(this.cache.put(rec)).catch(function () { /* cache full: keep in memory only */ }); };
+  // Returns true when something changed (so the UI re-renders). Never throws.
+  PhotoStore.prototype.sync = async function () {
+    var self = this, changed = false;
+    try {
+      await this.init();
+      var r = await this.c.rest('GET', '/rest/v1/exercise_photos?select=exercise_id,updated_at,removed&order=exercise_id.asc');
+      if (r.status === 404 || r.status === 403) { this.state = 'off'; return false; } // migration not applied (PGRST205) / not granted
+      if (!r.ok) return false; // network or server trouble: keep whatever state we had
+      var rows = await r.json(); if (!Array.isArray(rows)) return false;
+      this.state = 'ok';
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i], have = this.recs[row.exercise_id];
+        if (have && have.updated_at === row.updated_at && !!have.removed === !!row.removed) continue;
+        if (row.removed) { await this._keep({ exercise_id: row.exercise_id, thumb: '', updated_at: row.updated_at, removed: true }); changed = true; continue; }
+        var g = await this.c.rest('GET', '/rest/v1/exercise_photos?exercise_id=eq.' + encodeURIComponent(row.exercise_id) + '&select=exercise_id,thumb,updated_at,removed');
+        if (!g.ok) continue;
+        var one = await g.json(); if (!Array.isArray(one) || !one.length || !validThumb(one[0].thumb)) continue;
+        await this._keep({ exercise_id: one[0].exercise_id, thumb: one[0].thumb, updated_at: one[0].updated_at, removed: !!one[0].removed }); changed = true;
+      }
+    } catch (e) { /* offline etc.: the feature simply keeps what it has */ }
+    return changed;
+  };
+  PhotoStore.prototype._write = async function (exId, body) { // update; if no row yet, insert-only create (never overwrites), then update again
+    var J = { 'Content-Type': 'application/json' }, q = '?exercise_id=eq.' + encodeURIComponent(exId);
+    function chk(r) { if (!r.ok) throw codeErr('HTTP', 'photo write failed: HTTP ' + r.status, { status: r.status }); return r; }
+    async function patch(c) { var r = chk(await c.rest('PATCH', '/rest/v1/exercise_photos' + q, { headers: Object.assign({ Prefer: 'return=representation' }, J), body: JSON.stringify(body) })); var h = await r.json(); return Array.isArray(h) && h.length > 0; }
+    if (await patch(this.c)) return;
+    if (!body.thumb) return; // removing a photo that does not exist: nothing to do
+    chk(await this.c.rest('POST', '/rest/v1/exercise_photos?on_conflict=exercise_id', { headers: Object.assign({ Prefer: 'resolution=ignore-duplicates,return=minimal' }, J), body: JSON.stringify({ exercise_id: exId, thumb: body.thumb, removed: false }) }));
+    await patch(this.c); // the insert may have been ignored (someone else created it first): make ours the current one
+  };
+  // Explicit user actions: they throw on failure so the UI can say so. Nothing is queued and logging is never affected.
+  PhotoStore.prototype.set = async function (exId, thumb, nowIso) {
+    if (this.state !== 'ok') throw new Error('photos unavailable');
+    if (!validThumb(thumb)) throw new Error('bad photo');
+    var at = nowIso || new Date().toISOString();
+    await this._write(exId, { thumb: thumb, removed: false, updated_at: at });
+    await this._keep({ exercise_id: exId, thumb: thumb, updated_at: at, removed: false });
+  };
+  PhotoStore.prototype.remove = async function (exId, nowIso) {
+    if (this.state !== 'ok') throw new Error('photos unavailable');
+    var at = nowIso || new Date().toISOString();
+    await this._write(exId, { removed: true, updated_at: at });
+    await this._keep({ exercise_id: exId, thumb: '', updated_at: at, removed: true });
+  };
 
   function nfcTrim(name) { return String(name === null || name === undefined ? '' : name).normalize('NFC').trim(); }
   async function emailFor(name) {
@@ -462,7 +554,7 @@
   Store.prototype._persistPending = function () {
     if (!this._owns()) return; // never clobber the outbox of the tab that now owns it
     try {
-      this.kv.setItem('gl:pending', JSON.stringify(this.pending.map(function (p) { return { table: p.table, row: p.row, changed: p.changed, stamp: p.stamp }; })));
+      this.kv.setItem('gl:pending', JSON.stringify(this.pending.map(function (p) { return { table: p.table, row: p.row, changed: p.changed, extra: p.extra, stamp: p.stamp }; })));
       this._mem('pending', false);
     } catch (e) {
       this.lastError = 'local-persist: ' + e.message;
@@ -567,7 +659,7 @@
       // a login after a session loss reloads in the same page: never queue (or overwrite) what is already in memory
       if (self.pending.some(function (x) { return x.table === p.table && x.id === p.row.id; })) return;
       self.t[p.table].set(p.row.id, p.row);
-      self.pending.push({ table: p.table, id: p.row.id, row: p.row, rev: 0, changed: p.changed === undefined ? null : p.changed, stamp: p.stamp || newStamp() });
+      self.pending.push({ table: p.table, id: p.row.id, row: p.row, rev: 0, changed: p.changed === undefined ? null : p.changed, extra: p.extra, stamp: p.stamp || newStamp() });
     });
     this.pending.forEach(function (p) { self.t[p.table].set(p.id, p.row); });
     // refused work from earlier sessions stays visible
@@ -620,7 +712,10 @@
       this._persistRejected();
     }
     var hit = this.pending.filter(function (p) { return p.table === table && p.id === row.id; })[0];
-    if (hit) { hit.row = row; hit.rev++; hit.stamp = newStamp(); hit.changed = unionCols(hit.changed, changedNow); }
+    if (hit) {
+      if (hit.changed === null && changedNow) hit.extra = unionCols(hit.extra || [], changedNow); // an edit of a still-pending creation: sent as a PATCH after the insert-only POST
+      hit.row = row; hit.rev++; hit.stamp = newStamp(); hit.changed = unionCols(hit.changed, changedNow);
+    }
     else this.pending.push({ table: table, id: row.id, row: row, rev: 0, changed: changedNow, stamp: newStamp() });
     this._ver++;
     this._persistPending();
@@ -638,12 +733,12 @@
     while (this.pending.length) {
       if (this._stale(gen)) return true; // never send once another tab owns the outbox
       var item = this.pending[0], rev = item.rev;
-      try { await this.a.put(item.table, item.row, item.changed); }
+      try { await this.a.put(item.table, item.row, item.changed, item.extra); }
       catch (e) {
         if (this._stale(gen)) return true; // ownership changed while the request was out: touch nothing
         if (e && e.permanent && item.rev === rev) { // never block the queue behind a row the server will not take
           this.pending.splice(this.pending.indexOf(item), 1); this._ver++;
-          this.rejected.push({ table: item.table, row: item.row, changed: item.changed, status: e.status, error: String(e.message || e) });
+          this.rejected.push({ table: item.table, row: item.row, changed: item.changed, extra: item.extra, status: e.status, error: String(e.message || e) });
           this._persistPending(); this._persistRejected();
           this.lastError = String(e.message || e);
           continue;
@@ -679,7 +774,7 @@
     if (!this._owns()) return false; // a stale former holder must not touch either queue
     var self = this, back = this.rejected; this.rejected = [];
     back.forEach(function (r) {
-      self.pending.push({ table: r.table, id: r.row.id, row: r.row, rev: 0, changed: r.changed === undefined ? null : r.changed, stamp: newStamp() });
+      self.pending.push({ table: r.table, id: r.row.id, row: r.row, rev: 0, changed: r.changed === undefined ? null : r.changed, extra: r.extra, stamp: newStamp() });
     });
     this._persistRejected(); this._persistPending(); this.status = this._idleStatus(); this._emit();
     var ok = await this.flush();
@@ -765,6 +860,45 @@
     });
     return best ? best.sets : [];
   };
+  // Most recent EARLIER session of this exercise (this member) that has working sets -> the working sets (warm-ups skipped).
+  Store.prototype._lastWorking = function (memberId, exerciseId, beforeDate) {
+    var live = this._liveSets(), g = this._dayGroups(memberId), best = null;
+    Object.keys(g).forEach(function (d) {
+      if (d >= beforeDate) return;
+      var ss = live.filter(function (s) { return g[d].ids.indexOf(s.workout_id) >= 0 && s.exercise_id === exerciseId && !s.is_warmup; });
+      if (ss.length && (!best || d > best.date)) best = { date: d, sets: ss.sort(byPos) };
+    });
+    return best ? best.sets : [];
+  };
+  // "지난번" line: `50 - 60 - 60(40,20)`, '' when there is nothing to show
+  Store.prototype.lastLine = function (memberId, exerciseId, beforeDate) { return formatSets(this._lastWorking(memberId, exerciseId, beforeDate)); };
+  // Weight the nudge chips start from when the weight field is empty: last set of this exercise on that day, else the
+  // last working set of the previous session, else null.
+  Store.prototype.nudgeBase = function (memberId, exerciseId, date) {
+    var w = this.workoutFor(memberId, date), today = w ? this.setsForWorkout(w.id).filter(function (s) { return s.exercise_id === exerciseId && s.weight !== null; }) : [];
+    if (today.length) return today[today.length - 1].weight;
+    var prev = this._lastWorking(memberId, exerciseId, date).filter(function (s) { return s.weight !== null; });
+    return prev.length ? prev[prev.length - 1].weight : null;
+  };
+  // Copy a day (rows are created by the normal insert-only path). opts.sets=false only reports the exercise list.
+  // Archived exercises are skipped. Returns {sets, exercises, exerciseIds, ids}; undoCopy(result) soft-deletes what was created.
+  Store.prototype.copyDay = function (fromMember, fromDate, toMember, toDate, opts) {
+    var self = this, src = this.workoutFor(fromMember, fromDate);
+    if (fromMember === toMember && fromDate === toDate) throw new Error('same day');
+    var blocks = src ? this.blocksForWorkout(src.id).filter(function (b) { return !b.exercise.archived; }) : [];
+    if (!blocks.length) throw new Error('nothing to copy');
+    var res = { sets: 0, exercises: blocks.length, exerciseIds: blocks.map(function (b) { return b.exercise.id; }), ids: [] };
+    if (!(opts && opts.sets)) return res;
+    var w = this.getOrCreateWorkout(toMember, toDate);
+    blocks.forEach(function (b) {
+      b.sets.forEach(function (s) { res.ids.push(self.addSet(w.id, b.exercise.id, { weight: s.weight, drops: s.drops, note: s.note, is_warmup: s.is_warmup }).id); res.sets++; });
+    });
+    return res;
+  };
+  Store.prototype.undoCopy = function (res) {
+    var self = this;
+    (res.ids || []).forEach(function (id) { var s = self.t.sets.get(id); if (s && !s.deleted) self.deleteSet(id); });
+  };
   Store.prototype.recentExerciseIds = function () {
     var wd = {}, self = this, last = {};
     this._all('workouts').forEach(function (w) { wd[w.id] = w.date; });
@@ -838,10 +972,36 @@
     if (this.members().some(function (x) { return x.name === name && x.id !== id; })) throw new Error('duplicate member');
     return this._commit('members', Object.assign({}, m, { name: name }));
   };
-  Store.prototype.addExercise = function (name, bodyPart) {
+  // Feature detection (migration-002 may not be applied): the server returns every column with select=*, so rows that carry a
+  // `memo` key mean the column exists (and 가슴 is allowed by the same migration). The browser-only backend always supports both.
+  Store.prototype.supportsMemo = function () {
+    if (!this.a.remote) return true;
+    var all = this._all('exercises'); for (var i = 0; i < all.length; i++) if ('memo' in all[i]) return true;
+    return false;
+  };
+  Store.prototype.supportsChest = Store.prototype.supportsMemo;
+  Store.prototype.bodyParts = function () { var ok = this.supportsChest(); return BODY_PARTS.filter(function (b) { return ok || b !== '가슴'; }); };
+  function cleanMemo(m) {
+    if (m === undefined || m === null) return '';
+    if (typeof m !== 'string') throw new Error('invalid memo');
+    m = m.trim(); if (m.length > MEMO_MAX) throw new Error('memo too long'); return m;
+  }
+  // Client-side hint only (never written): first matching rule wins, so 트라이셉스벤치프레스 is 삼두, 레그컬 is 하체.
+  var HINTS = [['삼두', ['트라이셉스', '푸쉬다운', '푸시다운', '킥백']], ['하체', ['레그', '스쿼트', '런지']], ['이두', ['컬']], ['어깨', ['사레레', '숄더', '레터럴']],
+    ['등', ['풀업', '로우', '랫풀', '턱걸이']], ['가슴', ['벤치', '체스트', '인클라인', '펙덱', '푸쉬업', '푸시업']]];
+  function suggestBodyPart(name) {
+    var n = String(name || '').replace(/\s+/g, '');
+    for (var i = 0; i < HINTS.length; i++) for (var j = 0; j < HINTS[i][1].length; j++) if (n.indexOf(HINTS[i][1][j]) >= 0) return HINTS[i][0];
+    return null;
+  }
+  Store.prototype.addExercise = function (name, bodyPart, memo) {
     name = cleanName(name); assertBodyPart(bodyPart);
+    if (bodyPart === '가슴' && !this.supportsChest()) throw new Error('invalid body_part');
+    memo = cleanMemo(memo);
+    if (memo && !this.supportsMemo()) throw new Error('memo unsupported');
     if (this.exercises().some(function (e) { return e.name === name; })) throw new Error('duplicate exercise');
-    return this._newRow('exercises', { name: name, body_part: bodyPart, archived: false });
+    var f = { name: name, body_part: bodyPart, archived: false }; if (this.supportsMemo()) f.memo = memo;
+    return this._newRow('exercises', f);
   };
   Store.prototype.updateExercise = function (id, patch) {
     var e = this.exercise(id); if (!e) throw new Error('no exercise');
@@ -850,7 +1010,14 @@
       n.name = cleanName(patch.name);
       if (this.exercises().some(function (x) { return x.name === n.name && x.id !== id; })) throw new Error('duplicate exercise');
     }
-    if (patch.body_part !== undefined) { assertBodyPart(patch.body_part); n.body_part = patch.body_part; }
+    if (patch.body_part !== undefined) {
+      assertBodyPart(patch.body_part); n.body_part = patch.body_part;
+      if (patch.body_part === '가슴' && patch.body_part !== e.body_part && !this.supportsChest()) throw new Error('invalid body_part');
+    }
+    if (patch.memo !== undefined) {
+      var m = cleanMemo(patch.memo);
+      if (m !== (e.memo || '')) { if (!this.supportsMemo()) throw new Error('memo unsupported'); n.memo = m; }
+    }
     return this._commit('exercises', n);
   };
   Store.prototype.seedExercisesIfFirstRun = function () {
@@ -949,6 +1116,7 @@
     o.exercises.forEach(function (r) {
       if (!r || !str(r.id) || !str(r.name) || typeof r.archived !== 'boolean') bad('exercise row');
       if (BODY_PARTS.indexOf(r.body_part) < 0) bad('exercise body_part');
+      if (r.memo !== undefined && r.memo !== null && typeof r.memo !== 'string') bad('exercise memo');
     });
     o.workouts.forEach(function (r) {
       if (!r || !str(r.id) || !str(r.member_id) || !DATE_RE.test(r.date || '') || typeof r.deleted !== 'boolean') bad('workout row');
@@ -956,10 +1124,11 @@
     });
     o.sets.forEach(function (r) {
       if (!r || !str(r.id) || !str(r.workout_id) || !str(r.exercise_id) || typeof r.deleted !== 'boolean') bad('set row');
-      var wOk = typeof r.weight === 'number' && Number.isFinite(r.weight) && r.weight >= 0;
+      var wOk = okNum(r.weight);
       if (!wOk && !(o.version === 2 && r.weight === null && r.is_warmup === true)) bad('set weight');
-      if (r.drops !== undefined && r.drops !== null && !(Array.isArray(r.drops) && r.drops.every(function (d) { return typeof d === 'number' && Number.isFinite(d) && d >= 0; }))) bad('set drops');
-      if (r.weight2 !== null && r.weight2 !== undefined && (typeof r.weight2 !== 'number' || !Number.isFinite(r.weight2) || r.weight2 < 0)) bad('set weight2');
+      if (r.drops !== undefined && r.drops !== null && !(Array.isArray(r.drops) && r.drops.every(okNum))) bad('set drops');
+      if (r.is_warmup === true && Array.isArray(r.drops) && r.drops.length) bad('warm-up with drops');
+      if (r.weight2 !== null && r.weight2 !== undefined && !okNum(r.weight2)) bad('set weight2');
       if (typeof r.is_warmup !== 'boolean' || !Number.isFinite(r.position)) bad('set flags');
     });
     // duplicate ids inside one table
@@ -1028,7 +1197,7 @@
 
   return {
     BODY_PARTS: BODY_PARTS, SEED_EXERCISES: SEED_EXERCISES, parseSetLine: parseSetLine, parseLines: parseLines,
-    formatSet: formatSet, formatSets: formatSets, validateSetFields: validateSetFields, dayStats: dayStats, groupByBodyPart: groupByBodyPart,
+    suggestBodyPart: suggestBodyPart, PhotoStore: PhotoStore, MemCache: MemCache, fitSize: fitSize, validThumb: validThumb, PHOTO_MAX_CHARS: PHOTO_MAX_CHARS, formatSet: formatSet, formatSets: formatSets, nudge: nudge, validateSetFields: validateSetFields, dayStats: dayStats, groupByBodyPart: groupByBodyPart,
     delta: delta, MemoryStorage: MemoryStorage, LocalAdapter: LocalAdapter, SupabaseAdapter: SupabaseAdapter,
     SbClient: SbClient, SupabaseAuth: SupabaseAuth, emailFor: emailFor, Store: Store, LocalAuth: LocalAuth, sha256Hex: sha256Hex, workoutId: workoutId, rangeBounds: rangeBounds, validDate: validDate, validateImport: validateImport, todayStr: todayStr, addDays: addDays
   };
