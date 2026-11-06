@@ -929,9 +929,19 @@
       return st ? { date: d, count: st.count, avg: st.avg, max: st.max } : null;
     }).filter(Boolean);
   };
+  // months (YYYY-MM, newest first) in which the given members (default: everyone) have any live set
+  Store.prototype.monthsWithData = function (memberIds) {
+    var wd = {}, seen = {};
+    this._all('workouts').forEach(function (w) { if (!memberIds || memberIds.indexOf(w.member_id) >= 0) wd[w.id] = w.date; });
+    this._liveSets().forEach(function (s) { var d = wd[s.workout_id]; if (d) seen[d.slice(0, 7)] = 1; });
+    return Object.keys(seen).sort().reverse();
+  };
+  // bp = a body part, or null for ALL parts (sorted by body-part order, then name)
   Store.prototype.bodyPartSummary = function (bp, o) {
     var self = this;
-    return this.exercises(true).filter(function (e) { return e.body_part === bp; }).map(function (e) {
+    var list = this.exercises(true).filter(function (e) { return bp === null || bp === undefined || e.body_part === bp; });
+    if (bp === null || bp === undefined) list.sort(function (a, b) { return BODY_PARTS.indexOf(a.body_part) - BODY_PARTS.indexOf(b.body_part) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0); });
+    return list.map(function (e) {
       var pts = self.seriesFor(e.id, o);
       if (!pts.length) return null;
       var wk = {};
@@ -1189,7 +1199,17 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   }
   // 7/30/90-day ranges are N calendar days INCLUDING today; later dates never count.
-  function rangeBounds(today, r) { return { since: r === 'all' ? null : addDays(today, -(r - 1)), until: today }; }
+  // r = 7/30/90 | 'all' | {month:'YYYY-MM'} (that whole calendar month, leap years included; later dates never count only for the day ranges)
+  function rangeBounds(today, r) {
+    if (r && typeof r === 'object') {
+      var m = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(String(r.month === undefined || r.month === null ? '' : r.month));
+      if (!m) throw new Error('bad month');
+      var dt = new Date(0); dt.setUTCFullYear(Number(m[1]), Number(m[2]), 0); var last = dt.getUTCDate(); // day 0 of the next month = last day of this one (years < 100 safe)
+      var pre = m[1] + '-' + m[2];
+      return { since: pre + '-01', until: pre + '-' + (last < 10 ? '0' : '') + last };
+    }
+    return { since: r === 'all' ? null : addDays(today, -(r - 1)), until: today };
+  }
   function addDays(dateStr, n) {
     var p = dateStr.split('-').map(Number), d = new Date(p[0], p[1] - 1, p[2] + n);
     return todayStr(d);

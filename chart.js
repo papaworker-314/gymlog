@@ -49,7 +49,7 @@
       var path = pts.map(function (p, i) { return (i ? 'L' : 'M') + X(p.x).toFixed(1) + ' ' + Y(p.y).toFixed(1); }).join(' ');
       g += '<g class="series" data-name="' + esc(s.name) + '" opacity="' + op + '">' +
         (pts.length > 1 ? '<path d="' + path + '" fill="none" stroke="' + s.color + '" stroke-width="2.5" stroke-linejoin="round"' + (s.dash ? ' stroke-dasharray="5 4"' : '') + '/>' : '') +
-        pts.map(function (p) { return '<circle cx="' + X(p.x).toFixed(1) + '" cy="' + Y(p.y).toFixed(1) + '" r="' + (s.dash ? 2.5 : 4) + '" fill="' + s.color + '"><title>' + esc(p.x + ' ' + p.y) + '</title></circle>'; }).join('') +
+        (pts.length > 30 ? '' : pts.map(function (p) { return '<circle cx="' + X(p.x).toFixed(1) + '" cy="' + Y(p.y).toFixed(1) + '" r="' + (s.dash ? 2.5 : 4) + '" fill="' + s.color + '"><title>' + esc(p.x + ' ' + p.y) + '</title></circle>'; }).join('')) + // many days: the line alone stays readable (no overlapping dots)
         '</g>';
     });
     return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(o.label || '그래프') + '" preserveAspectRatio="xMidYMid meet">' + g + '</svg>';

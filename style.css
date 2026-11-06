@@ -109,3 +109,6 @@ details summary { min-height: 44px; display: flex; align-items: center; cursor: 
 .zoomimg { display: block; width: 100%; max-height: 60vh; object-fit: contain; border-radius: 12px; }
 .photobtn { display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
 .topbtns { display: flex; gap: 8px; }
+.pill { min-height: 36px; padding: 0 12px; border-radius: 18px; font-size: 14px; border: 1px solid var(--line); background: var(--card); color: var(--muted); }
+.pill.on { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 600; }
+select.chip { appearance: none; -webkit-appearance: none; padding-right: 16px; }

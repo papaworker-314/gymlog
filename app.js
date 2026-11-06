@@ -62,7 +62,7 @@
   var COLORS = ['#e8590c', '#1c7ed6', '#2f9e44', '#ae3ec9', '#f08c00', '#0ca678'];
   var S = {
     tab: 'log', view: null, date: GL.todayStr(), draft: [], wu: {}, focus: null, sheet: null, loginErr: '',
-    g: { mode: 'ex', exId: null, mem: 'all', wu: false, max: true, bp: '이두', range: 30 }
+    g: { mode: 'ex', exId: null, mem: 'all', wu: false, max: true, bp: '전체', range: 'all' }
   };
   var $app = document.getElementById('app');
   var $sheet = document.getElementById('sheet');
@@ -197,7 +197,7 @@
     return '<div id="robanner" class="banner"' + (roNow() ? '' : ' hidden') + '>다른 창에서 열려 있어요. 그 창을 닫거나 잠시 기다리면 여기서 이어서 쓸 수 있어요. (지금은 보기만 가능해요)</div>' +
       '<div id="offbanner" class="banner"' + (store.offline ? '' : ' hidden') + '>오프라인이에요. 저장된 기록으로 열었고, 새 기록은 연결되면 자동으로 올라가요.</div>' +
       '<div class="top"><div id="savestate" class="save ' + store.status + '"></div>' +
-      '<div class="topbtns">' + (photos && (photos.available() || Object.keys(photos.recs).length) ? '<button data-act="eye" aria-label="사진 보기" aria-pressed="' + showPhotos() + '">' + (showPhotos() ? '👁' : '🚫') + '</button>' : '') +
+      '<div class="topbtns">' + (photos && (photos.available() || Object.keys(photos.recs).length) ? '<button class="pill' + (showPhotos() ? ' on' : '') + '" data-act="eye" aria-label="사진 보기" aria-pressed="' + showPhotos() + '">' + (showPhotos() ? '사진 켜짐' : '사진 꺼짐') + '</button>' : '') +
       '<button data-act="gear" aria-label="설정">⚙ 설정</button></div></div>' +
       (noChips ? '' : '<div class="chips" id="memberchips">' + members.map(function (m) {
         return '<button class="chip' + (m.id === S.view ? ' on' : '') + '" data-act="member" data-id="' + esc(m.id) + '">' + esc(m.name) + '</button>';
@@ -268,6 +268,14 @@
     return COLORS[(i < 0 ? 0 : i) % COLORS.length];
   }
   function rangeOf(r) { return GL.rangeBounds(GL.todayStr(), r); }
+  function isMonth(r) { return r && typeof r === 'object'; }
+  // period control shared by 운동별 and 부위별: 전체 first, 7/30/90 days, then a native month picker (only months that have data)
+  function periodHtml(g) {
+    var months = store.monthsWithData(memberIdsFor(g.mem)), cur = isMonth(g.range) ? g.range.month : '';
+    if (cur && months.indexOf(cur) < 0) months.push(cur), months.sort().reverse();
+    return '<div class="chips" id="periodchips">' + ['all', 7, 30, 90].map(function (r) { return '<button class="chip' + (g.range === r ? ' on' : '') + '" data-act="grange" data-r="' + r + '">' + (r === 'all' ? '전체' : r + '일') + '</button>'; }).join('') +
+      '<select id="gmonth" class="chip' + (cur ? ' on' : '') + '" aria-label="월 선택"><option value="">월 선택</option>' + months.map(function (m) { return '<option value="' + m + '"' + (m === cur ? ' selected' : '') + '>' + m + '</option>'; }).join('') + '</select></div>';
+  }
   function memberIdsFor(mem) { return mem === 'all' ? null : [mem]; }
 
   function exercisesWithData() {
@@ -289,13 +297,13 @@
         var l = exs.filter(function (e) { return e.body_part === bp; });
         return l.length ? '<optgroup label="' + esc(bp) + '">' + l.map(function (e) { return '<option value="' + esc(e.id) + '"' + (e.id === g.exId ? ' selected' : '') + '>' + esc(e.name) + (e.archived ? ' (보관됨)' : '') + '</option>'; }).join('') + '</optgroup>' : '';
       }).join('') + '</select>';
-      html += '<div style="height:8px"></div><select id="gmem" aria-label="멤버">' + memOpts + '</select>';
+      html += '<div style="height:8px"></div><select id="gmem" aria-label="멤버">' + memOpts + '</select>' + periodHtml(g);
       html += '<div class="opts">' + wuOpt + '<label><input type="checkbox" id="gmax"' + (g.max ? ' checked' : '') + '>최대값 선도 표시</label></div>';
       if (!ex) return html + '<div class="empty">아직 운동이 없어요.</div>';
       var mids = g.mem === 'all' ? store.members(true).map(function (m) { return m.id; }) : [g.mem];
       var series = [], tables = '';
       mids.forEach(function (id) {
-        var pts = store.seriesFor(ex.id, { memberIds: [id], includeWarmup: g.wu });
+        var pts = store.seriesFor(ex.id, { memberIds: [id], includeWarmup: g.wu, since: rangeOf(g.range).since, until: rangeOf(g.range).until });
         if (!pts.length) return;
         var m = store.member(id), color = memberColor(id);
         if (g.max) series.push({ name: m.name + ' 최대', color: color, dash: true, opacity: .45, points: pts.map(function (p) { return { x: p.date, y: p.max }; }) });
@@ -306,19 +314,19 @@
           pts.slice(-10).reverse().map(function (p) { return '<tr><td>' + esc(p.date.slice(2)) + '</td><td>' + p.count + '</td><td>' + fmt(p.avg) + '</td><td>' + fmt(p.max) + '</td></tr>'; }).join('') + '</table></div>';
       });
       html += '<div class="muted">' + exName(ex) + badge(ex) + '</div>';
-      if (!series.length) return html + '<div class="empty">이 운동의 기록이 없어요.</div>';
+      if (!series.length) return html + '<div class="empty">' + (g.range === 'all' ? '이 운동의 기록이 없어요.' : '이 기간의 기록이 없어요.') + '</div>';
       html += '<div class="card" id="chartbox">' + GLChart.line({ series: series, label: ex.name + ' 성장 그래프' }) + '<div class="legend">' +
         series.filter(function (s) { return !s.dash; }).map(function (s) { return '<span><i style="background:' + s.color + '"></i>' + esc(s.name.replace(' 평균', '')) + '</span>'; }).join('') +
         (g.max ? '<span class="muted">점선 = 최대</span>' : '') + '</div></div>' + tables;
     } else {
-      html += '<div class="chips">' + store.bodyParts().map(function (b) { return '<button class="chip' + (g.bp === b ? ' on' : '') + '" data-act="gbp" data-bp="' + esc(b) + '">' + esc(b) + '</button>'; }).join('') + '</div>';
-      html += '<div class="chips">' + [7, 30, 90, 'all'].map(function (r) { return '<button class="chip' + (g.range === r ? ' on' : '') + '" data-act="grange" data-r="' + r + '">' + (r === 'all' ? '전체' : r + '일') + '</button>'; }).join('') + '</div>';
-      html += '<select id="gmem" aria-label="멤버">' + memOpts + '</select><div class="opts">' + wuOpt + '</div>';
-      var rows = store.bodyPartSummary(g.bp, { memberIds: memberIdsFor(g.mem), since: rangeOf(g.range).since, until: rangeOf(g.range).until, includeWarmup: g.wu });
+      if (g.bp !== '전체' && store.bodyParts().indexOf(g.bp) < 0) g.bp = '전체';
+      html += '<div class="chips">' + ['전체'].concat(store.bodyParts()).map(function (b) { return '<button class="chip' + (g.bp === b ? ' on' : '') + '" data-act="gbp" data-bp="' + esc(b) + '">' + esc(b) + '</button>'; }).join('') + '</div>'; // 전체 is a view filter only, never a body part
+      html += '<select id="gmem" aria-label="멤버">' + memOpts + '</select>' + periodHtml(g) + '<div class="opts">' + wuOpt + '</div>';
+      var rows = store.bodyPartSummary(g.bp === '전체' ? null : g.bp, { memberIds: memberIdsFor(g.mem), since: rangeOf(g.range).since, until: rangeOf(g.range).until, includeWarmup: g.wu });
       html += rows.length ? rows.map(function (r) {
         return '<button class="hist card" style="width:100%" data-act="gopen" data-id="' + esc(r.exercise.id) + '"><span><b>' + exName(r.exercise) + '</b>' + badge(r.exercise) +
           '<br><span class="muted">' + r.sessions + '회 · 최근 평균 ' + fmt(r.latestAvg) + '</span></span><span class="delta ' + (r.change > 0 ? 'up' : r.change < 0 ? 'down' : '') + '">' + signed(r.change) + '</span></button>';
-      }).join('') : '<div class="empty">이 부위의 기록이 없어요.</div>';
+      }).join('') : '<div class="empty">' + (g.range === 'all' ? '이 부위의 기록이 없어요.' : '이 기간의 기록이 없어요.') + '</div>';
     }
     return html;
   }
@@ -634,6 +642,7 @@
       if (S.sheet && S.sheet.type === 'copyday') { S.sheet.m = $('cdm').value; S.sheet.date = $('cdd').value; S.sheet.sets = $('cdsets').checked; renderSheet(); }
     }
     else if (id === 'datein') { if (ev.target.value) { S.date = ev.target.value; S.draft = []; render(); } }
+    else if (id === 'gmonth') { S.g.range = ev.target.value ? { month: ev.target.value } : 'all'; render(); }
     else if (id === 'gex') { S.g.exId = ev.target.value; render(); }
     else if (id === 'gmem') { S.g.mem = ev.target.value; render(); }
     else if (id === 'gwu') { S.g.wu = ev.target.checked; render(); }
