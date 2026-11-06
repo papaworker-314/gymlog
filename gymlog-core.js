@@ -20,27 +20,35 @@
   var DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
   // ------------------------------------------------------------------
-  // ENTRY FORMAT — the ONE place that defines what a pasted line means.
-  // ASSUMPTION (owner to confirm): `[웜업] - weight - weight2 (note)`
-  //   first number = weight (graphed), second = weight2 (shown only),
-  //   text in parentheses = note. Change parseSetLine/formatSet to change it.
+  // ENTRY FORMAT — the ONE place that defines what a pasted line means (owner's rules, round 7).
+  // Tokens separated by " - " are SETS, in order, one set each:
+  //   웜업 (or a listed synonym)  = one warm-up set, no weight (a number may follow: `웜업 40`)
+  //   a number                    = one WORKING set at that weight
+  //   (a,b) right after a number  = DROPS: weight reduced without rest, continuing the SAME set: 25(20,10)
+  //   a trailing dash (`7.5 -`)   = just that one set (the empty token is ignored)
   // ------------------------------------------------------------------
   var NUM = '(\\d+(?:\\.\\d+)?)';
-  var LINE_RE = new RegExp(
-    '^\\s*(웜업\\s*-\\s*)?' + NUM + '\\s*(?:-\\s*(?:' + NUM + ')?)?\\s*(?:\\(([^()]*)\\))?\\s*$'
-  );
+  var WARMUP_WORDS = ['웜업', '웝업', '워밍업', '워업'];
+  var WARM_RE = new RegExp('^(' + WARMUP_WORDS.join('|') + ')(?:\\s+' + NUM + ')?$');
+  var WORK_RE = new RegExp('^' + NUM + '(?:\\s*\\(\\s*(' + NUM + '(?:\\s*,\\s*' + NUM + ')*)\\s*\\))?$');
 
   function parseSetLine(text) {
     if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'empty' };
-    var m = LINE_RE.exec(text);
-    if (!m) return { ok: false, error: 'format' };
-    var weight = Number(m[2]);
-    var weight2 = m[3] === undefined ? null : Number(m[3]);
-    if (!Number.isFinite(weight) || (weight2 !== null && !Number.isFinite(weight2))) {
-      return { ok: false, error: 'number' };
+    if (/^[-\s]*$/.test(text)) return { ok: false, error: 'only dashes' };
+    var tokens = text.trim().split(/\s+-(?:\s+|$)/).map(function (x) { return x.trim(); }).filter(function (x) { return x; });
+    var sets = [];
+    for (var i = 0; i < tokens.length; i++) {
+      var tk = tokens[i], m = WARM_RE.exec(tk);
+      if (m) { sets.push({ is_warmup: true, weight: m[2] === undefined ? null : Number(m[2]), drops: null, note: '' }); continue; }
+      m = WORK_RE.exec(tk);
+      if (m) {
+        var drops = m[2] === undefined ? null : m[2].split(',').map(function (d) { return Number(d.trim()); });
+        sets.push({ is_warmup: false, weight: Number(m[1]), drops: drops, note: '' }); continue;
+      }
+      return { ok: false, error: (/^[^\d()\-,.\s]+$/.test(tk) ? 'unknown word "' + tk + '"' : 'cannot read "' + tk + '"') };
     }
-    var note = m[4] === undefined ? '' : m[4].trim();
-    return { ok: true, value: { is_warmup: !!m[1], weight: weight, weight2: weight2, note: note } };
+    if (!sets.length) return { ok: false, error: 'empty' };
+    return { ok: true, sets: sets };
   }
 
   function parseLines(text) {
@@ -48,7 +56,7 @@
     String(text || '').split(/\r?\n/).forEach(function (line, i) {
       if (!line.trim()) return;
       var r = parseSetLine(line);
-      if (r.ok) ok.push(r.value); else errors.push({ line: i + 1, text: line, error: r.error });
+      if (r.ok) r.sets.forEach(function (x) { ok.push(x); }); else errors.push({ line: i + 1, text: line, error: r.error });
     });
     return { ok: ok, errors: errors };
   }
@@ -57,26 +65,40 @@
     return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
   }
 
+  // one set in the memo format: `웜업`, `웜업 40`, `60`, `25(20,10)`
   function formatSet(s) {
-    var out = (s.is_warmup ? '웜업 - ' : '') + fmtNum(s.weight);
-    if (s.weight2 !== null && s.weight2 !== undefined) out += ' - ' + fmtNum(s.weight2);
-    if (s.note) out += ' (' + s.note + ')';
+    var hasW = s.weight !== null && s.weight !== undefined;
+    if (s.is_warmup) return '웜업' + (hasW ? ' ' + fmtNum(s.weight) : '');
+    var out = hasW ? fmtNum(s.weight) : '';
+    if (s.drops && s.drops.length) out += '(' + s.drops.map(fmtNum).join(',') + ')';
     return out;
   }
+  function formatSets(list) { return list.map(formatSet).join(' - '); }
 
   // Validates structured form fields (UI form). Returns {ok,value}|{ok:false,error}.
+  // A working set needs a weight; a warm-up may have none. drops: comma text or an array of numbers >= 0.
   function validateSetFields(f) {
-    function num(v, required) {
-      if (v === null || v === undefined || String(v).trim() === '') return required ? NaN : null;
+    function num(v) {
+      if (v === null || v === undefined || String(v).trim() === '') return null;
       var s = String(v).trim().replace(',', '.');
       if (!/^\d+(\.\d+)?$/.test(s)) return NaN;
       return Number(s);
     }
-    var w = num(f.weight, true);
-    if (!Number.isFinite(w)) return { ok: false, error: 'weight' };
-    var w2 = num(f.weight2, false);
-    if (w2 !== null && !Number.isFinite(w2)) return { ok: false, error: 'weight2' };
-    return { ok: true, value: { is_warmup: !!f.is_warmup, weight: w, weight2: w2, note: String(f.note || '').trim() } };
+    var warm = !!f.is_warmup, w = num(f.weight);
+    if (w !== null && !Number.isFinite(w)) return { ok: false, error: 'weight' };
+    if (w === null && !warm) return { ok: false, error: 'weight' };
+    var drops = null;
+    if (Array.isArray(f.drops) || (f.drops !== null && f.drops !== undefined && String(f.drops).trim() !== '')) {
+      var parts = Array.isArray(f.drops) ? f.drops : String(f.drops).split(',');
+      drops = [];
+      for (var i = 0; i < parts.length; i++) {
+        var raw = typeof parts[i] === 'number' ? String(parts[i]) : String(parts[i]).trim().replace(',', '.');
+        if (!/^\d+(\.\d+)?$/.test(raw)) return { ok: false, error: 'drops' };
+        drops.push(Number(raw));
+      }
+      if (!drops.length) drops = null;
+    }
+    return { ok: true, value: { is_warmup: warm, weight: w, drops: drops, note: String(f.note || '').trim() } };
   }
 
   // ------------------------------------------------------------------
@@ -162,7 +184,7 @@
     members: ['id', 'name', 'archived'],
     exercises: ['id', 'name', 'body_part', 'archived'],
     workouts: ['id', 'member_id', 'date', 'note', 'deleted'],
-    sets: ['id', 'workout_id', 'exercise_id', 'position', 'is_warmup', 'weight', 'weight2', 'note', 'deleted', 'updated_at']
+    sets: ['id', 'workout_id', 'exercise_id', 'position', 'is_warmup', 'weight', 'drops', 'note', 'deleted', 'updated_at']
   };
   function codeErr(code, msg, extra) { var e = new Error(msg || code); e.code = code; if (extra) Object.keys(extra).forEach(function (k) { e[k] = extra[k]; }); return e; }
 
@@ -274,6 +296,8 @@
     var o = {}; COLS[table].forEach(function (c) { if (row[c] !== undefined) o[c] = row[c]; });
     return o;
   }
+  // A brand-new row omits a null `drops` (the server default is null), so plain sets also work before the drops column exists.
+  function newRowBody(table, row) { var b = pickCols(table, row); if (table === 'sets' && b.drops === null) delete b.drops; return b; }
   // `changed` = columns the user changed on an EXISTING row: only those are PATCHed (never a whole-row overwrite, never
   // `deleted:false` unless that is the change). null = brand-new row -> full upsert. If the PATCH matches no row on the
   // server (it only ever existed offline) fall through to the upsert so FK order and history stay intact.
@@ -292,7 +316,7 @@
       if (Array.isArray(hit) && hit.length) return;
     }
     var r = await this.c.rest('POST', '/rest/v1/' + table + '?on_conflict=id',
-      { headers: Object.assign({ Prefer: 'resolution=merge-duplicates,return=minimal' }, J), body: JSON.stringify(pickCols(table, row)) });
+      { headers: Object.assign({ Prefer: 'resolution=merge-duplicates,return=minimal' }, J), body: JSON.stringify(newRowBody(table, row)) });
     if (!r.ok) throw fail(r);
   };
   // The server has no DELETE privilege; never attempt a remote wipe.
@@ -419,6 +443,7 @@
     this.leaseOn = !!opts.lease; this.leaseId = newStamp(); this.leaseNow = opts.leaseNow || Date.now;
     this.leaseDelay = opts.leaseDelay === undefined ? 80 : opts.leaseDelay; this.leaseTtl = 8000;
     this.writer = !this.leaseOn;
+    this.gen = 0; // ownership/load generation: bumped when the lease is lost or a load adopts the queue; async completions from an older one do nothing
     this._ver = 0; // bumps on every local change / completed write (lets refresh() detect a race)
   }
 
@@ -435,7 +460,7 @@
   }
   // The durable outbox belongs to the single writer (see the lease below): it is simply the current queue.
   Store.prototype._persistPending = function () {
-    if (!this.writer) return; // never clobber the outbox of the tab that now owns it
+    if (!this._owns()) return; // never clobber the outbox of the tab that now owns it
     try {
       this.kv.setItem('gl:pending', JSON.stringify(this.pending.map(function (p) { return { table: p.table, row: p.row, changed: p.changed, stamp: p.stamp }; })));
       this._mem('pending', false);
@@ -448,7 +473,7 @@
   Store.prototype._mem = function (dest, bad) { this._memFail[dest] = bad; this.memoryOnly = this._memFail.pending || this._memFail.rejected; };
   // Refused writes are durable too (shown after a reload with a badge, retry/edit possible).
   Store.prototype._persistRejected = function () {
-    if (!this.writer) return;
+    if (!this._owns()) return;
     try {
       this.kv.setItem('gl:rejected', JSON.stringify(this.rejected));
       this._mem('rejected', false);
@@ -483,8 +508,19 @@
   Store.prototype._holdsLease = function () { if (!this.leaseOn) return true; var l = this._leaseRead(); return !!(l && l.id === this.leaseId); };
   // Another tab owns the outbox now: drop our in-memory copy WITHOUT touching storage (the new writer adopted it).
   Store.prototype._lostLease = function () {
+    this.gen++; this.flushing = null; // old callbacks are void, and a later flush() must not reuse the old in-flight promise
     this.writer = false; this.pending = []; this.rejected = []; this.status = 'saved'; this._emit();
   };
+  // The persistence fence: true only when this store is the writer per the ACTUAL lease in storage (not the cached flag).
+  // If the lease is no longer ours it demotes the store and returns false.
+  Store.prototype._owns = function () {
+    if (!this.leaseOn) return true;
+    if (!this.writer) return false;
+    if (this._holdsLease()) return true;
+    this._lostLease(); return false;
+  };
+  // An async completion is stale when the generation moved on or the lease is no longer ours.
+  Store.prototype._stale = function (gen) { return gen !== this.gen || !this._owns(); };
   Store.prototype.releaseLease = function () {
     if (this.leaseOn && this._holdsLease()) { try { this.kv.removeItem('gl:lease'); } catch (e) { /* best effort */ } }
     if (this.leaseOn) this.writer = false;
@@ -523,7 +559,7 @@
       lists = snap; this.offline = true;
     }
     TABLES.forEach(function (n) { self.t[n] = new Map(lists[n].map(function (r) { return [r.id, r]; })); });
-    this.writer = got; // only now (nothing awaited from here to the end of adoption) are writes enabled
+    this.writer = got; if (got) this.gen++; // only now (nothing awaited from here to the end of adoption) are writes enabled
     if (!this.writer) { this.status = 'saved'; this._emit(); return; } // read-only tab: server data only, the outbox belongs to the writer
     // unsent work from earlier sessions (a dead tab's outbox is adopted here, once)
     readList(this.kv, 'gl:pending').forEach(function (p) {
@@ -596,15 +632,17 @@
   // Sequential per-row writes. Resolves true when queue is empty, false when a write failed (data stays queued).
   Store.prototype._run = async function () {
     if (this.leaseOn && !this.writer) return true; // read-only: nothing to send, the writer owns the outbox
+    var gen = this.gen;
     this.status = this.pending.length ? (this.memoryOnly ? 'failed' : 'saving') : this._idleStatus();
     this._emit();
     while (this.pending.length) {
-      if (this.leaseOn && !this._holdsLease()) { this._lostLease(); return true; } // never send once another tab owns the outbox
+      if (this._stale(gen)) return true; // never send once another tab owns the outbox
       var item = this.pending[0], rev = item.rev;
       try { await this.a.put(item.table, item.row, item.changed); }
       catch (e) {
+        if (this._stale(gen)) return true; // ownership changed while the request was out: touch nothing
         if (e && e.permanent && item.rev === rev) { // never block the queue behind a row the server will not take
-          this.pending.shift(); this._ver++;
+          this.pending.splice(this.pending.indexOf(item), 1); this._ver++;
           this.rejected.push({ table: item.table, row: item.row, changed: item.changed, status: e.status, error: String(e.message || e) });
           this._persistPending(); this._persistRejected();
           this.lastError = String(e.message || e);
@@ -613,8 +651,9 @@
         if (e && e.permanent) continue; // a newer version of this row was queued meanwhile: try that one
         this.status = 'failed'; this.lastError = String(e && e.message || e); this._emit(); return false;
       }
+      if (this._stale(gen)) return true; // (a stale response must not remove, persist or report anything)
       this._ver++;
-      if (item.rev === rev) { this.pending.shift(); } // else a newer version was queued meanwhile: write it next
+      if (item.rev === rev) { var ix = this.pending.indexOf(item); if (ix >= 0) this.pending.splice(ix, 1); } // exact operation identity, never shift(); else a newer version was queued meanwhile: write it next
       this._persistPending();
     }
     if (!this.pending.length) this._mem('pending', false); // nothing unsent is left in the queue (refused rows keep their own flag)
@@ -631,12 +670,13 @@
     if (this.flushing) return this.flushing;
     // the in-flight marker is set AFTER _run() is created and cleared only in .then, so an empty-queue
     // run (which finishes synchronously) can never leave a stale marker behind
-    var p = this._run().then(function (r) { self.flushing = null; return r; }, function (e) { self.flushing = null; throw e; });
+    var p = this._run().then(function (r) { if (self.flushing === p) self.flushing = null; return r; }, function (e) { if (self.flushing === p) self.flushing = null; throw e; });
     this.flushing = p;
     return p;
   };
   // Put every refused row back in the queue (after the cause was fixed) and send again.
   Store.prototype.retryRejected = async function () {
+    if (!this._owns()) return false; // a stale former holder must not touch either queue
     var self = this, back = this.rejected; this.rejected = [];
     back.forEach(function (r) {
       self.pending.push({ table: r.table, id: r.row.id, row: r.row, rev: 0, changed: r.changed === undefined ? null : r.changed, stamp: newStamp() });
@@ -845,7 +885,7 @@
   Store.prototype.updateSet = function (id, fields, base) {
     var s = this.t.sets.get(id); if (!s) throw new Error('no set');
     if (base) {
-      var cur = { weight: s.weight, weight2: s.weight2 === null ? '' : s.weight2, note: s.note, is_warmup: s.is_warmup }, eff = {};
+      var cur = { weight: s.weight === null ? '' : s.weight, drops: s.drops && s.drops.length ? s.drops.join(',') : '', note: s.note, is_warmup: s.is_warmup }, eff = {};
       Object.keys(fields).forEach(function (k) { eff[k] = (k in base && String(base[k]) === String(fields[k])) ? cur[k] : fields[k]; });
       fields = eff;
     }
@@ -886,14 +926,23 @@
 
   // ---- export / import ----
   Store.prototype.exportData = function () {
-    var out = { app: 'gymlog', version: 1, exported_at: this.now() }, self = this;
+    var out = { app: 'gymlog', version: 2, exported_at: this.now() }, self = this;
     TABLES.forEach(function (t) { out[t] = sortById(Array.from(self.t[t].values()).map(clone)); });
+    out.sets = out.sets.map(upgradeSet); // legacy 무게2 never leaves the app as a column: it is kept in the note
     return out;
   };
+  // The old second weight (무게2) has no meaning any more; keep its value visible in the note so nothing is lost.
+  function upgradeSet(r) {
+    var n = clone(r);
+    if (n.weight2 !== null && n.weight2 !== undefined) n.note = (n.note ? n.note + ' ' : '') + '무게2: ' + fmtNum(n.weight2);
+    delete n.weight2;
+    if (n.drops === undefined) n.drops = null;
+    return n;
+  }
   function validateImport(o, existing) {
     function bad(m) { throw new Error('import rejected: ' + m); }
     if (!o || typeof o !== 'object' || o.app !== 'gymlog') bad('not a gymlog backup');
-    if (o.version !== 1) bad('unsupported version');
+    if (o.version !== 1 && o.version !== 2) bad('unsupported version');
     TABLES.forEach(function (t) { if (!Array.isArray(o[t])) bad('missing table ' + t); });
     function str(v) { return typeof v === 'string' && v.length > 0; }
     o.members.forEach(function (r) { if (!r || !str(r.id) || !str(r.name) || typeof r.archived !== 'boolean') bad('member row'); });
@@ -907,7 +956,9 @@
     });
     o.sets.forEach(function (r) {
       if (!r || !str(r.id) || !str(r.workout_id) || !str(r.exercise_id) || typeof r.deleted !== 'boolean') bad('set row');
-      if (typeof r.weight !== 'number' || !Number.isFinite(r.weight) || r.weight < 0) bad('set weight');
+      var wOk = typeof r.weight === 'number' && Number.isFinite(r.weight) && r.weight >= 0;
+      if (!wOk && !(o.version === 2 && r.weight === null && r.is_warmup === true)) bad('set weight');
+      if (r.drops !== undefined && r.drops !== null && !(Array.isArray(r.drops) && r.drops.every(function (d) { return typeof d === 'number' && Number.isFinite(d) && d >= 0; }))) bad('set drops');
       if (r.weight2 !== null && r.weight2 !== undefined && (typeof r.weight2 !== 'number' || !Number.isFinite(r.weight2) || r.weight2 < 0)) bad('set weight2');
       if (typeof r.is_warmup !== 'boolean' || !Number.isFinite(r.position)) bad('set flags');
     });
@@ -930,7 +981,8 @@
     var self = this, existing = {};
     TABLES.forEach(function (t) { existing[t] = Array.from(self.t[t].keys()); });
     validateImport(o, existing);
-    TABLES.forEach(function (t) { o[t].forEach(function (r) { self._commit(t, r, false); }); });
+    var rows = { members: o.members, exercises: o.exercises, workouts: o.workouts, sets: o.sets.map(upgradeSet) };
+    TABLES.forEach(function (t) { rows[t].forEach(function (r) { self._commit(t, r, false); }); });
     await this.flush();
     return TABLES.reduce(function (acc, t) { acc[t] = o[t].length; return acc; }, {});
   };
@@ -976,7 +1028,7 @@
 
   return {
     BODY_PARTS: BODY_PARTS, SEED_EXERCISES: SEED_EXERCISES, parseSetLine: parseSetLine, parseLines: parseLines,
-    formatSet: formatSet, validateSetFields: validateSetFields, dayStats: dayStats, groupByBodyPart: groupByBodyPart,
+    formatSet: formatSet, formatSets: formatSets, validateSetFields: validateSetFields, dayStats: dayStats, groupByBodyPart: groupByBodyPart,
     delta: delta, MemoryStorage: MemoryStorage, LocalAdapter: LocalAdapter, SupabaseAdapter: SupabaseAdapter,
     SbClient: SbClient, SupabaseAuth: SupabaseAuth, emailFor: emailFor, Store: Store, LocalAuth: LocalAuth, sha256Hex: sha256Hex, workoutId: workoutId, rangeBounds: rangeBounds, validDate: validDate, validateImport: validateImport, todayStr: todayStr, addDays: addDays
   };

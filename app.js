@@ -38,7 +38,7 @@
 
   // ---------------- read-only (another window holds the writer lease) ----------------
   var WRITE_ACTS = ['addset', 'same', 'copylast', 'paste', 'editset', 'saveset', 'delset', 'delblock', 'delday', 'confirmyes', 'addex', 'pick', 'newex', 'wu', 'ewu',
-    'madd', 'mrename', 'marchive', 'eadd', 'esave', 'earchive', 'doimport', 'undo', 'retryrejected', 'retry'];
+    'addwu', 'madd', 'mrename', 'marchive', 'eadd', 'esave', 'earchive', 'doimport', 'undo', 'retryrejected', 'retry'];
   function roNow() { return remote && !!auth.current() && !store.writer; }
   function applyRO() {
     var ro = roNow(), b = $('robanner'); if (b) b.hidden = !ro;
@@ -85,7 +85,7 @@
   // Re-render after a data change without wiping what the user already typed into OTHER cards' fields.
   function captureDrafts() {
     var d = {};
-    Array.prototype.forEach.call($app.querySelectorAll('input[id^="w-"],input[id^="w2-"],input[id^="n-"],textarea[id^="p-"]'), function (e) { if (e.value) d[e.id] = e.value; });
+    Array.prototype.forEach.call($app.querySelectorAll('input[id^="w-"],input[id^="d-"],input[id^="n-"],textarea[id^="p-"]'), function (e) { if (e.value) d[e.id] = e.value; });
     return d;
   }
   function restoreDrafts(d, skipEx) {
@@ -158,10 +158,15 @@
       }).join('') + '</div>');
   }
 
+  // drops are shown as a descent: `25 ↘ 20 ↘ 10`
+  function dropsHtml(s) { return s.drops && s.drops.length ? s.drops.map(function (d) { return ' <span class="drop">↘ ' + esc(GL.formatSet({ weight: d, drops: null })) + '</span>'; }).join('') : ''; }
+  // rows saved before round 7 may still carry the old second weight: keep it visible (it has no meaning any more)
+  function legacyHtml(s) { return s.weight2 !== null && s.weight2 !== undefined ? ' <span class="muted">(무게2 ' + esc(s.weight2) + ')</span>' : ''; }
+
   function blockHtml(ex, sets) {
     var rows = sets.map(function (s, i) {
       return '<div class="setrow"><span class="idx">' + (i + 1) + '</span><button class="txt" data-act="editset" data-id="' + esc(s.id) + '">' +
-        (store.isRejected('sets', s.id) ? '<span class="tag reject">서버 거부</span> ' : '') + (s.is_warmup ? '<span class="tag">웜업</span> ' : '') + '<b>' + esc(GL.formatSet({ weight: s.weight, weight2: s.weight2, note: s.note, is_warmup: false })) + '</b></button>' +
+        (store.isRejected('sets', s.id) ? '<span class="tag reject">서버 거부</span> ' : '') + (s.is_warmup ? '<span class="tag">웜업</span> ' : '') + (s.weight === null ? '' : '<b>' + esc(GL.formatSet({ weight: s.weight, drops: null })) + '</b>') + dropsHtml(s) + legacyHtml(s) + (s.note ? ' <span class="muted">' + esc(s.note) + '</span>' : '') + '</button>' +
         '<button class="ghost" data-act="editset" data-id="' + esc(s.id) + '" aria-label="수정">✎</button></div>';
     }).join('');
     var last = sets.length ? sets[sets.length - 1] : null;
@@ -171,13 +176,13 @@
       '<button class="ghost danger" data-act="delblock" data-ex="' + esc(ex.id) + '" aria-label="운동 삭제">🗑</button></div>' + rows +
       '<div class="entry"><button class="wu' + on + '" data-act="wu" data-ex="' + esc(ex.id) + '" aria-pressed="' + (!!S.wu[ex.id]) + '">웜업</button>' +
       '<input id="w-' + esc(ex.id) + '" inputmode="decimal" placeholder="무게" autocomplete="off">' +
-      '<input id="w2-' + esc(ex.id) + '" inputmode="decimal" placeholder="무게2(선택)" autocomplete="off">' +
+      '<input id="d-' + esc(ex.id) + '" inputmode="text" placeholder="드롭 20,10 (선택)" autocomplete="off">' +
       '<input class="note" id="n-' + esc(ex.id) + '" placeholder="메모(선택)" autocomplete="off">' +
       '<button class="primary add" data-act="addset" data-ex="' + esc(ex.id) + '">추가</button></div>' +
-      '<div class="quick">' +
+      '<div class="quick"><button class="bigwu" data-act="addwu" data-ex="' + esc(ex.id) + '">웜업 추가</button>' +
       '<button data-act="same" data-ex="' + esc(ex.id) + '"' + (last ? '' : ' disabled') + '>이전 세트와 같게</button>' +
       '<button data-act="copylast" data-ex="' + esc(ex.id) + '"' + (prevSess.length ? '' : ' disabled') + '>지난 기록 복사' + (prevSess.length ? ' (' + prevSess.length + '세트)' : '') + '</button></div>' +
-      '<details><summary>붙여넣기 입력 (예: 웜업 - 15 - 20(15))</summary><textarea id="p-' + esc(ex.id) + '" placeholder="한 줄에 한 세트"></textarea>' +
+      '<details><summary>붙여넣기 입력 (예: 웜업 - 60 - 25(20,10))</summary><textarea id="p-' + esc(ex.id) + '" placeholder="웜업 - 60 - 60&#10;20 - 25(20,10)"></textarea>' +
       '<div class="err" id="perr-' + esc(ex.id) + '"></div><button data-act="paste" data-ex="' + esc(ex.id) + '">붙여넣은 세트 추가</button></details></div>';
   }
 
@@ -297,7 +302,7 @@
     } else if (s.type === 'editset') {
       var st = store.t.sets.get(s.id), ex = store.exercise(st.exercise_id);
       h = '<h2>' + exName(ex) + badge(ex) + '</h2><div class="entry" style="grid-template-columns:56px 1fr 1fr"><button class="wu' + (st.is_warmup ? ' on' : '') + '" id="ewu" data-act="ewu">웜업</button>' +
-        '<input id="ew" inputmode="decimal" value="' + esc(st.weight) + '"><input id="ew2" inputmode="decimal" value="' + esc(st.weight2 === null ? '' : st.weight2) + '">' +
+        '<input id="ew" inputmode="decimal" placeholder="무게" value="' + esc(st.weight === null ? '' : st.weight) + '"><input id="ed" inputmode="text" placeholder="드롭 20,10" value="' + esc(st.drops && st.drops.length ? st.drops.join(',') : '') + '">' +
         '<input class="note" id="en" value="' + esc(st.note) + '" placeholder="메모"></div><div class="err" id="serr"></div>' +
         '<div class="row" style="margin-top:8px"><button class="primary grow" data-act="saveset">저장</button><button class="danger grow" data-act="delset">삭제</button><button class="grow" data-act="close">닫기</button></div>';
     } else if (s.type === 'confirm') {
@@ -349,7 +354,7 @@
     S.draft = S.draft.filter(function (id) { return id !== exId; });
   }
   function readEntry(exId) {
-    return { weight: $('w-' + exId).value, weight2: $('w2-' + exId).value, note: $('n-' + exId).value, is_warmup: !!S.wu[exId] };
+    return { weight: $('w-' + exId).value, drops: $('d-' + exId).value, note: $('n-' + exId).value, is_warmup: !!S.wu[exId] };
   }
   function undoToast(msg, token) { toast(msg, function () { store.undo(token); }); }
 
@@ -375,18 +380,19 @@
     ewu: function () { $('ewu').classList.toggle('on'); },
     addset: function (d) {
       var f = readEntry(d.ex), v = GL.validateSetFields(f);
-      if (!v.ok) { toast('무게를 0 이상의 숫자로 입력해 주세요'); $('w-' + d.ex).focus(); return; }
+      if (!v.ok) { toast(v.error === 'drops' ? '드롭은 쉼표로 구분한 숫자로 입력해 주세요 (예: 20,10)' : '무게를 0 이상의 숫자로 입력해 주세요 (웜업은 무게를 비워도 돼요)'); $((v.error === 'drops' ? 'd-' : 'w-') + d.ex).focus(); return; }
       addSets(d.ex, [f]); S.wu[d.ex] = false; // warm-up toggle applies to one set, then resets
       S.focus = 'w-' + d.ex; changed(d.ex);
     },
+    addwu: function (d) { addSets(d.ex, [{ weight: '', drops: '', note: '', is_warmup: true }]); S.focus = 'w-' + d.ex; changed(d.ex); }, // one tap: a weightless warm-up set
     same: function (d) {
       var w = store.workoutFor(S.view, S.date), sets = w ? store.setsForWorkout(w.id).filter(function (s) { return s.exercise_id === d.ex; }) : [];
       var last = sets[sets.length - 1]; if (!last) return;
-      addSets(d.ex, [{ weight: last.weight, weight2: last.weight2, note: last.note, is_warmup: last.is_warmup }]); changed();
+      addSets(d.ex, [{ weight: last.weight, drops: last.drops, note: last.note, is_warmup: last.is_warmup }]); changed();
     },
     copylast: function (d) {
       var src = store.lastSession(S.view, d.ex, S.date); if (!src.length) return;
-      addSets(d.ex, src.map(function (s) { return { weight: s.weight, weight2: s.weight2, note: s.note, is_warmup: s.is_warmup }; }));
+      addSets(d.ex, src.map(function (s) { return { weight: s.weight, drops: s.drops, note: s.note, is_warmup: s.is_warmup }; }));
       toast('지난 기록 ' + src.length + '세트를 복사했어요'); changed();
     },
     paste: function (d) {
@@ -399,11 +405,11 @@
     },
     editset: function (d) {
       var st = store.t.sets.get(d.id); // the values the form is opened with: only edits relative to these are saved
-      openSheet({ type: 'editset', id: d.id, base: st ? { weight: String(st.weight), weight2: st.weight2 === null ? '' : String(st.weight2), note: st.note, is_warmup: !!st.is_warmup } : null });
+      openSheet({ type: 'editset', id: d.id, base: st ? { weight: st.weight === null ? '' : String(st.weight), drops: st.drops && st.drops.length ? st.drops.join(',') : '', note: st.note, is_warmup: !!st.is_warmup } : null });
     },
     saveset: function () {
       var s = S.sheet, ok = guard(function () {
-        store.updateSet(s.id, { weight: $('ew').value, weight2: $('ew2').value, note: $('en').value, is_warmup: $('ewu').classList.contains('on') }, s.base); return true;
+        store.updateSet(s.id, { weight: $('ew').value, drops: $('ed').value, note: $('en').value, is_warmup: $('ewu').classList.contains('on') }, s.base); return true;
       });
       if (ok) { closeSheet(); changed(); }
     },

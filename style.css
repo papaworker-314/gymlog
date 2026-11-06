@@ -95,3 +95,6 @@ details summary { min-height: 44px; display: flex; align-items: center; cursor: 
 .banner[hidden] { display: none; }
 .tag.reject { border-color: var(--bad); color: var(--bad); }
 .save.rejected { color: var(--bad); } .save.rejected .dot { background: var(--bad); }
+
+.drop { color: var(--muted, #888); font-weight: 600; }
+.quick .bigwu { font-weight: 700; }
