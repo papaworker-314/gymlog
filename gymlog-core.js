@@ -7,7 +7,10 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var BODY_PARTS = ['이두', '삼두', '가슴', '어깨', '등', '복근', '하체', '기타']; // 가슴 needs migration-002 on the server (see Store.supportsChest)
+  var BODY_PARTS = ['이두', '삼두', '가슴', '어깨', '등', '복근', '하체', '유산소', '기타']; // 가슴 needs migration-002, 유산소 migration-004 (Store.supportsChest / supportsCardio)
+  var CARDIO_PART = '유산소'; // the one body part whose exercises are cardio (minutes + distance instead of weight + reps)
+  var CARDIO_GOAL = 2; // default weekly cardio goal (days per Mon-Sun week); the app passes config.cardioGoal when set
+  function isCardio(ex) { return !!ex && ex.body_part === CARDIO_PART; }
   var MEMO_MAX = 200;
   var SEED_EXERCISES = [
     { name: '트라이셉스벤치프레스', body_part: '삼두' },
@@ -21,40 +24,52 @@
   var DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
   // ------------------------------------------------------------------
-  // ENTRY FORMAT — the ONE place that defines what a pasted line means (owner's rules, round 7).
+  // ENTRY FORMAT — the ONE place that defines what a pasted line means (owner's rules, round 7; reps since round 11).
   // Tokens separated by " - " are SETS, in order, one set each:
-  //   웜업 (or a listed synonym)  = one warm-up set, no weight (a number may follow: `웜업 40`)
+  //   웜업 (or a listed synonym)  = one warm-up set, no weight (a number may follow: `웜업 40`, reps too: `웜업 40(15)`)
   //   a number                    = one WORKING set at that weight
-  //   (a,b) right after a number  = DROPS: weight reduced without rest, continuing the SAME set: 25(20,10)
+  //   (n) right after it          = REPS, an integer 1..1000: `60(12)` = 60 for 12 reps
   //   a trailing dash (`7.5 -`)   = just that one set (the empty token is ignored)
+  // BREAKING (round 11): parentheses used to mean drops. The old drop list `25(20,10)` is REJECTED with a Korean
+  // line error, never reinterpreted as reps. Legacy drops already stored stay readable (shown muted, kept in export).
   // ------------------------------------------------------------------
   var MAX_NUM = 100000; // explicit domain limit for weights/drops (rejects absurd or non-finite digit strings)
   function okNum(n) { return typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= MAX_NUM; }
   var NUM = '(\\d+(?:\\.\\d+)?)';
   var WARMUP_WORDS = ['웜업', '웝업', '워밍업', '워업'];
-  var WARM_RE = new RegExp('^(' + WARMUP_WORDS.join('|') + ')(?:\\s+' + NUM + ')?$');
-  var WORK_RE = new RegExp('^' + NUM + '(?:\\s*\\(\\s*(' + NUM + '(?:\\s*,\\s*' + NUM + ')*)\\s*\\))?$');
+  var REPS = '(?:\\s*\\(\\s*(\\d+)\\s*\\))?';
+  var WARM_RE = new RegExp('^(' + WARMUP_WORDS.join('|') + ')(?:\\s+' + NUM + ')?' + REPS + '$');
+  var WORK_RE = new RegExp('^' + NUM + REPS + '$');
+  var REPS_MAX = 1000;
+  function okReps(n) { return Number.isInteger(n) && n >= 1 && n <= REPS_MAX; }
+  var KO_DROPS = '드롭은 이제 따로 기록해요 — 괄호 안에는 횟수만 써요 (예: 60(12))';
+  var KO_REPS = '횟수는 1~1000 사이의 정수예요 (예: 60(12))';
 
+  // Errors: {ok:false, error (English, internal), ko (Korean, shown to the user)}.
+  function perr(error, ko) { return { ok: false, error: error, ko: ko }; }
   function parseSetLine(text) {
-    if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'empty' };
-    if (/^[-\s]*$/.test(text)) return { ok: false, error: 'only dashes' };
+    if (typeof text !== 'string' || !text.trim()) return perr('empty', '입력된 내용이 없어요');
+    if (/^[-\s]*$/.test(text)) return perr('only dashes', '숫자가 없어요');
     var tokens = text.trim().split(/\s+-(?:\s+|$)/).map(function (x) { return x.trim(); }).filter(function (x) { return x; });
     var sets = [];
     for (var i = 0; i < tokens.length; i++) {
-      var tk = tokens[i], m = WARM_RE.exec(tk);
+      var tk = tokens[i], m = WARM_RE.exec(tk), cut = '"' + tk.slice(0, 20) + '"';
       if (m) {
-        if (m[2] !== undefined && !okNum(Number(m[2]))) return { ok: false, error: 'number out of range "' + tk.slice(0, 20) + '"' };
-        sets.push({ is_warmup: true, weight: m[2] === undefined ? null : Number(m[2]), drops: null, note: '' }); continue;
+        if (m[2] !== undefined && !okNum(Number(m[2]))) return perr('number out of range ' + cut, '숫자가 너무 커요 ' + cut);
+        if (m[3] !== undefined && !okReps(Number(m[3]))) return perr('reps out of range ' + cut, KO_REPS);
+        sets.push({ is_warmup: true, weight: m[2] === undefined ? null : Number(m[2]), reps: m[3] === undefined ? null : Number(m[3]), drops: null, note: '' }); continue;
       }
       m = WORK_RE.exec(tk);
       if (m) {
-        var drops = m[2] === undefined ? null : m[2].split(',').map(function (d) { return Number(d.trim()); });
-        if (!okNum(Number(m[1])) || (drops && !drops.every(okNum))) return { ok: false, error: 'number out of range "' + tk.slice(0, 20) + '"' };
-        sets.push({ is_warmup: false, weight: Number(m[1]), drops: drops, note: '' }); continue;
+        if (!okNum(Number(m[1]))) return perr('number out of range ' + cut, '숫자가 너무 커요 ' + cut);
+        if (m[2] !== undefined && !okReps(Number(m[2]))) return perr('reps out of range ' + cut, KO_REPS);
+        sets.push({ is_warmup: false, weight: Number(m[1]), reps: m[2] === undefined ? null : Number(m[2]), drops: null, note: '' }); continue;
       }
-      return { ok: false, error: (/^[^\d()\-,.\s]+$/.test(tk) ? 'unknown word "' + tk + '"' : 'cannot read "' + tk + '"') };
+      if (/\([^)]*,/.test(tk)) return perr('old drop syntax ' + cut, KO_DROPS); // `25(20,10)`: never reinterpreted
+      if (/\(\s*\d*\.\d*\s*\)?$/.test(tk)) return perr('reps not an integer ' + cut, KO_REPS);
+      return /^[^\d()\-,.\s]+$/.test(tk) ? perr('unknown word "' + tk + '"', '모르는 말이에요 "' + tk + '"') : perr('cannot read ' + cut, '읽을 수 없어요 ' + cut);
     }
-    if (!sets.length) return { ok: false, error: 'empty' };
+    if (!sets.length) return perr('empty', '입력된 내용이 없어요');
     return { ok: true, sets: sets };
   }
 
@@ -63,20 +78,21 @@
     String(text || '').split(/\r?\n/).forEach(function (line, i) {
       if (!line.trim()) return;
       var r = parseSetLine(line);
-      if (r.ok) r.sets.forEach(function (x) { ok.push(x); }); else errors.push({ line: i + 1, text: line, error: r.error });
+      if (r.ok) r.sets.forEach(function (x) { ok.push(x); }); else errors.push({ line: i + 1, text: line, error: r.error, ko: r.ko });
     });
     return { ok: ok, errors: errors };
   }
 
   function fmtNum(n) { return String(n); } // exact: never rounds away precision the parser accepted (domain is capped by MAX_NUM)
 
-  // one set in the memo format: `웜업`, `웜업 40`, `60`, `25(20,10)`
+  function has(v) { return v !== null && v !== undefined; }
+  // one set in the notebook format: `웜업`, `웜업 40(15)`, `60`, `60(12)`; cardio `30분 · 5.2km`.
+  // Legacy drops are NOT written into this text any more (they are shown separately, muted, and kept in the data).
   function formatSet(s) {
-    var hasW = s.weight !== null && s.weight !== undefined;
-    if (s.is_warmup) return '웜업' + (hasW ? ' ' + fmtNum(s.weight) : '');
-    var out = hasW ? fmtNum(s.weight) : '';
-    if (s.drops && s.drops.length) out += '(' + s.drops.map(fmtNum).join(',') + ')';
-    return out;
+    if (has(s.minutes)) return fmtNum(s.minutes) + '분' + (has(s.distance) ? ' · ' + fmtNum(s.distance) + 'km' : '');
+    var w = has(s.weight) ? fmtNum(s.weight) : '', r = has(s.reps) ? '(' + s.reps + ')' : '';
+    if (s.is_warmup) return '웜업' + (w ? ' ' + w : '') + r;
+    return w + r;
   }
   function formatSets(list) { return list.map(formatSet).join(' - '); }
   // weight chips (+2.5/+5/-2.5): `cur` is the field text; empty/unreadable -> `fallback` (or 0). Never below 0 or above MAX_NUM.
@@ -86,15 +102,29 @@
     return fmtNum(Math.min(MAX_NUM, Math.max(0, v)));
   }
 
-  // Validates structured form fields (UI form). Returns {ok,value}|{ok:false,error}.
-  // A working set needs a weight; a warm-up may have none. drops: comma text or an array of numbers >= 0.
-  function validateSetFields(f) {
+  // Validates structured form fields (UI form). Returns {ok,value}|{ok:false,error}. kind 'cardio' = a 유산소 exercise.
+  // Strength: a working set needs a weight; a warm-up may have none; reps optional (integer 1..1000);
+  //   drops (legacy only, never offered by the entry form): comma text or an array of numbers >= 0.
+  // Cardio: minutes required (integer 1..600), distance km optional (0..300); no weight, reps, warm-up or drops.
+  var MINUTES_MAX = 600, DISTANCE_MAX = 300;
+  function filled(v) { return v !== null && v !== undefined && String(v).trim() !== ''; }
+  function validateSetFields(f, kind) {
     function num(v) {
-      if (v === null || v === undefined || String(v).trim() === '') return null;
+      if (!filled(v)) return null;
       var s = String(v).trim().replace(',', '.');
       if (!/^\d+(\.\d+)?$/.test(s)) return NaN;
       return Number(s);
     }
+    function int(v) { if (!filled(v)) return null; var s = String(v).trim(); return /^\d+$/.test(s) ? Number(s) : NaN; }
+    var note = String(f.note || '').trim(), dropsGiven = Array.isArray(f.drops) ? f.drops.length > 0 : filled(f.drops);
+    if (kind === 'cardio') {
+      if (f.is_warmup || filled(f.weight) || filled(f.reps) || dropsGiven) return { ok: false, error: 'cardio' };
+      var mi = int(f.minutes); if (mi === null || !(mi >= 1 && mi <= MINUTES_MAX)) return { ok: false, error: 'minutes' };
+      var di = num(f.distance); if (di !== null && !(di >= 0 && di <= DISTANCE_MAX)) return { ok: false, error: 'distance' };
+      return { ok: true, value: { is_warmup: false, weight: null, reps: null, minutes: mi, distance: di, drops: null, note: note } };
+    }
+    if (filled(f.minutes) || filled(f.distance)) return { ok: false, error: 'minutes' }; // minutes belong to cardio exercises
+    var reps = int(f.reps); if (reps !== null && !okReps(reps)) return { ok: false, error: 'reps' };
     var warm = !!f.is_warmup, w = num(f.weight);
     if (w !== null && !okNum(w)) return { ok: false, error: 'weight' };
     if (w === null && !warm) return { ok: false, error: 'weight' };
@@ -111,7 +141,31 @@
       if (!drops.length) drops = null;
       if (drops && warm) return { ok: false, error: 'drops' }; // drops belong to working sets
     }
-    return { ok: true, value: { is_warmup: warm, weight: w, drops: drops, note: String(f.note || '').trim() } };
+    return { ok: true, value: { is_warmup: warm, weight: w, reps: reps, minutes: null, distance: null, drops: drops, note: note } };
+  }
+
+  // Volume (합계) = Σ weight × reps over the given sets, warm-ups INCLUDED when they have both (owner: "how many kg I
+  // moved in total"). Sets without weight or reps (and cardio sets) do not count. Nothing countable -> null (not 0).
+  function volumeOf(sets) {
+    var sum = 0, any = false;
+    sets.forEach(function (s) {
+      if (s.deleted || !has(s.weight) || !has(s.reps) || !Number.isFinite(s.weight) || !Number.isFinite(s.reps)) return;
+      sum += s.weight * s.reps; any = true;
+    });
+    return any ? Math.round(sum * 1000) / 1000 : null;
+  }
+  // unit-less number with thousands separators: 1,420 / 150.5
+  function fmtVolume(v) {
+    var r = Math.round(Number(v) * 1000) / 1000, p = String(Math.abs(r)).split('.');
+    p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return (r < 0 ? '-' : '') + p.join('.');
+  }
+  // "지난번" text from Store.lastInfo: `60(12) - 70(10) · 합계 1,980 · 최고 2,100`. 합계/최고 are omitted when the last
+  // session had no set with reps (literal reading of ROUND11 §1).
+  function lastLineText(info) {
+    if (!info || !info.line) return '';
+    if (info.volume === null || info.volume === undefined) return info.line;
+    return info.line + ' · 합계 ' + fmtVolume(info.volume) + (has(info.best) ? ' · 최고 ' + fmtVolume(info.best) : '');
   }
 
   // ------------------------------------------------------------------
@@ -197,7 +251,7 @@
     members: ['id', 'name', 'archived'],
     exercises: ['id', 'name', 'body_part', 'archived', 'memo'], // memo exists only after migration-002: it is sent only when set/changed, and only if the server rows carry it
     workouts: ['id', 'member_id', 'date', 'note', 'deleted'],
-    sets: ['id', 'workout_id', 'exercise_id', 'position', 'is_warmup', 'weight', 'drops', 'note', 'deleted', 'updated_at']
+    sets: ['id', 'workout_id', 'exercise_id', 'position', 'is_warmup', 'weight', 'drops', 'note', 'deleted', 'updated_at', 'reps', 'minutes', 'distance'] // reps/minutes/distance exist only after migration-004: rows carry them only when the server does (Store.supportsReps)
   };
   function codeErr(code, msg, extra) { var e = new Error(msg || code); e.code = code; if (extra) Object.keys(extra).forEach(function (k) { e[k] = extra[k]; }); return e; }
 
@@ -286,11 +340,16 @@
     return this.c.hasTokens() ? Promise.resolve() : Promise.reject(codeErr('AUTH', 'not logged in'));
   };
   // Pages with Range headers; follows Content-Range so a server page cap below 1000 still loads everything.
-  SupabaseAdapter.prototype.list = async function (table) {
-    var PAGE = 1000, from = 0, out = [];
+  SupabaseAdapter.prototype.list = function (table) {
     var filter = table === 'sets' ? '&deleted=eq.false' : ''; // workouts: deleted days are loaded too, so re-opening one is an explicit revive (PATCH), never a creation
+    return this._pages(table, '/rest/v1/' + table + '?select=*&order=id.asc' + filter);
+  };
+  // Soft-deleted sets, 4 columns only: used for the block order key (R11 fix), never shown, never written.
+  SupabaseAdapter.prototype.listTombs = function () { return this._pages('sets', '/rest/v1/sets?select=id,workout_id,exercise_id,position&order=id.asc&deleted=eq.true'); };
+  SupabaseAdapter.prototype._pages = async function (table, path) {
+    var PAGE = 1000, from = 0, out = [];
     for (;;) {
-      var r = await this.c.rest('GET', '/rest/v1/' + table + '?select=*&order=id.asc' + filter,
+      var r = await this.c.rest('GET', path,
         { headers: { 'Range-Unit': 'items', Range: from + '-' + (from + PAGE - 1), Prefer: 'count=exact' } });
       if (r.status === 416) break; // range past the end
       if (!r.ok) throw codeErr('HTTP', 'read ' + table + ' failed: HTTP ' + r.status, { status: r.status });
@@ -309,8 +368,13 @@
     var o = {}; COLS[table].forEach(function (c) { if (row[c] !== undefined) o[c] = row[c]; });
     return o;
   }
-  // A brand-new row omits a null `drops` (the server default is null), so plain sets also work before the drops column exists.
-  function newRowBody(table, row) { var b = pickCols(table, row); if (table === 'sets' && b.drops === null) delete b.drops; return b; }
+  // A brand-new row omits null `drops` / `reps` / `minutes` / `distance` (the server default is null), so plain sets also
+  // work on a server that does not have those columns yet.
+  function newRowBody(table, row) {
+    var b = pickCols(table, row);
+    if (table === 'sets') ['drops', 'reps', 'minutes', 'distance'].forEach(function (c) { if (b[c] === null) delete b[c]; });
+    return b;
+  }
   // `changed` = columns the user changed on an EXISTING row: only those are PATCHed (never a whole-row overwrite, never
   // `deleted:false` unless that is the change). null = brand-new row -> full upsert. If the PATCH matches no row on the
   // server (it only ever existed offline) fall through to the upsert so FK order and history stay intact.
@@ -339,6 +403,19 @@
         if (!er.ok) throw fail(er);
       }
     }
+  };
+  // Capability probe (migration-004), read-only and independent of row data, so an EMPTY migrated table is detected too.
+  // -> {reps:true} (columns exist) | {reps:false} (PostgREST says the column does not exist) | null (anything else: unknown).
+  // Network / auth errors throw from rest(); the Store treats every non-answer as "keep the last confirmed value".
+  SupabaseAdapter.prototype.probeCaps = async function () {
+    var r = await this.c.rest('GET', '/rest/v1/sets?select=reps,minutes,distance&limit=0');
+    if (r.ok) return { reps: true };
+    if (r.status === 400) {
+      var j = null; try { j = await r.json(); } catch (e) { /* no body */ }
+      var code = j && j.code ? String(j.code) : '', msg = j && j.message ? String(j.message) : '';
+      if (code === '42703' || code === 'PGRST204' || code === 'PGRST100' || /column .* does not exist/i.test(msg)) return { reps: false };
+    }
+    return null;
   };
   // The server has no DELETE privilege; never attempt a remote wipe.
   SupabaseAdapter.prototype.clear = function () { return Promise.reject(new Error('remote wipe is not supported')); };
@@ -537,7 +614,22 @@
     this.writer = !this.leaseOn;
     this.gen = 0; // ownership/load generation: bumped when the lease is lost or a load adopts the queue; async completions from an older one do nothing
     this._ver = 0; // bumps on every local change / completed write (lets refresh() detect a race)
+    this.caps = readCaps(this.kv); // last CONFIRMED server capability (migration-004), cached for offline starts
+    this.tombs = new Map(); // remote soft-deleted sets {id, workout_id, exercise_id, position}: block order key only
   }
+  Store.prototype._loadTombs = async function () {
+    if (!this.a.listTombs) return;
+    try { var list = await this.a.listTombs(); this.tombs = new Map(list.map(function (r) { return [r.id, r]; })); }
+    catch (e) { /* keep what we had: the order key degrades to live + local rows, nothing else depends on it */ }
+  };
+  function readCaps(kv) { try { var c = JSON.parse(kv.getItem('gl:caps')); return c && typeof c.reps === 'boolean' ? { reps: c.reps } : {}; } catch (e) { return {}; } }
+  Store.prototype._probeCaps = async function () {
+    if (!this.a.probeCaps) return;
+    var r; try { r = await this.a.probeCaps(); } catch (e) { return; } // network / auth: keep the last confirmed value
+    if (!r || typeof r.reps !== 'boolean') return; // 5xx / unexpected: unknown, keep
+    this.caps = { reps: r.reps };
+    try { this.kv.setItem('gl:caps', JSON.stringify(this.caps)); } catch (e) { /* quota: memory only */ }
+  };
 
   Store.prototype.on = function (fn) { this.listeners.push(fn); };
   Store.prototype._emit = function () {
@@ -574,7 +666,8 @@
   Store.prototype.isRejected = function (table, id) { return this.rejected.some(function (r) { return r.table === table && r.row.id === id; }); };
   // Offline start: a copy of the server tables from the last successful load/refresh.
   Store.prototype._saveSnap = function (lists) {
-    try { this.kv.setItem('gl:snap', JSON.stringify({ at: this.now(), t: lists })); } catch (e) { /* too big / quota: just no offline start */ }
+    var t = Object.assign({}, lists, { tombs: Array.from(this.tombs ? this.tombs.values() : []) });
+    try { this.kv.setItem('gl:snap', JSON.stringify({ at: this.now(), t: t })); } catch (e) { /* too big / quota: just no offline start */ }
   };
   Store.prototype._readSnap = function () {
     var raw = this.kv.getItem('gl:snap');
@@ -650,6 +743,8 @@
       if (!snap) throw e;
       lists = snap; this.offline = true;
     }
+    if (!this.offline) { await this._probeCaps(); await this._loadTombs(); this._saveSnap(lists); } // neither throws
+    else this.tombs = new Map((lists.tombs || []).map(function (r) { return [r.id, r]; }));
     TABLES.forEach(function (n) { self.t[n] = new Map(lists[n].map(function (r) { return [r.id, r]; })); });
     this.writer = got; if (got) this.gen++; // only now (nothing awaited from here to the end of adoption) are writes enabled
     if (!this.writer) { this.status = 'saved'; this._emit(); return; } // read-only tab: server data only, the outbox belongs to the writer
@@ -678,8 +773,9 @@
   Store.prototype.refresh = async function () {
     var ver = this._ver, fresh = {}, self = this;
     for (var i = 0; i < TABLES.length; i++) fresh[TABLES[i]] = await this.a.list(TABLES[i]);
+    var capsBefore = this.caps.reps; await this._probeCaps(); await this._loadTombs();
     if (ver !== this._ver) return false;
-    var changed = this.offline;
+    var changed = this.offline || capsBefore !== this.caps.reps;
     this.offline = false;
     TABLES.forEach(function (t) {
       var m = new Map(fresh[t].map(function (r) { return [r.id, r]; }));
@@ -823,15 +919,30 @@
     var ids = this._dayIds(wid);
     return this._liveSets().filter(function (s) { return ids.indexOf(s.workout_id) >= 0; }).sort(byPos);
   };
-  Store.prototype.blocksForWorkout = function (wid) {
+  // Default: oldest block first (copyDay relies on it). o.newestFirst (the day view): blocks sorted by the persisted
+  // position of each exercise's FIRST set that day, newest first. More sets never move a block; same order on every
+  // device and after reload (positions are stored); ties (concurrent devices) break on the exercise id. Sets stay ascending.
+  // R11 fix (master decision, r2): the key is min(position) over ALL sets of that exercise in that day INCLUDING soft-deleted
+  // ones (local rows + the read-only tombstone list), so deleting the first set never moves a block. READ-ONLY: nothing is
+  // ever written because of a tombstone. Accepted consequence: a block deleted completely and re-added keeps its old key.
+  Store.prototype._daySetsAll = function (wid, exerciseId) {
+    var ids = this._dayIds(wid), self = this, rows = Array.from(this.t.sets.values());
+    this.tombs.forEach(function (r) { if (!self.t.sets.has(r.id)) rows.push({ id: r.id, workout_id: r.workout_id, exercise_id: r.exercise_id, position: r.position, deleted: true }); }); // a loaded row always wins over its tombstone; these copies are only read, never stored or written
+    return rows.filter(function (s) { return ids.indexOf(s.workout_id) >= 0 && (!exerciseId || s.exercise_id === exerciseId); });
+  };
+  Store.prototype.blocksForWorkout = function (wid, o) {
     var self = this, order = [], map = {};
     this.setsForWorkout(wid).forEach(function (s) {
       var ex = self.exercise(s.exercise_id);
       if (!ex) return; // dangling reference (should not exist): never render a null exercise
-      if (!map[s.exercise_id]) { map[s.exercise_id] = { exercise: ex, sets: [] }; order.push(s.exercise_id); }
+      if (!map[s.exercise_id]) { map[s.exercise_id] = { exercise: ex, sets: [], key: s.position }; order.push(s.exercise_id); }
       map[s.exercise_id].sets.push(s);
+      if (s.position < map[s.exercise_id].key) map[s.exercise_id].key = s.position;
     });
-    return order.map(function (id) { return map[id]; });
+    if (o && o.newestFirst) this._daySetsAll(wid).forEach(function (s) { var b = map[s.exercise_id]; if (b && s.deleted && s.position < b.key) b.key = s.position; });
+    var blocks = order.map(function (id) { return map[id]; });
+    if (o && o.newestFirst) blocks.sort(function (a, b) { return b.key - a.key || (a.exercise.id < b.exercise.id ? 1 : a.exercise.id > b.exercise.id ? -1 : 0); });
+    return blocks;
   };
   // member's live days grouped by date: {date: {ids:[workout ids], workout: canonical}}
   Store.prototype._dayGroups = function (memberId) {
@@ -870,8 +981,57 @@
     });
     return best ? best.sets : [];
   };
-  // "지난번" line: `50 - 60 - 60(40,20)`, '' when there is nothing to show
+  // "지난번" line: `50 - 60(12) - 60(10)`, '' when there is nothing to show
   Store.prototype.lastLine = function (memberId, exerciseId, beforeDate) { return formatSets(this._lastWorking(memberId, exerciseId, beforeDate)); };
+  // this member's live sets of one exercise grouped by date: {date: [sets ascending]}
+  Store.prototype._exDays = function (memberId, exerciseId) {
+    var g = this._dayGroups(memberId), wd = {}, out = {};
+    Object.keys(g).forEach(function (d) { g[d].ids.forEach(function (id) { wd[id] = d; }); });
+    this._liveSets().forEach(function (s) { var d = wd[s.workout_id]; if (s.exercise_id === exerciseId && d) (out[d] = out[d] || []).push(s); });
+    Object.keys(out).forEach(function (d) { out[d].sort(byPos); });
+    return out;
+  };
+  // {line, volume, best}: line = the last earlier session's working sets (as lastLine); volume = that session's 합계 for
+  // this exercise (warm-ups included); best = the best single-session 합계 of this member+exercise BEFORE beforeDate.
+  Store.prototype.lastInfo = function (memberId, exerciseId, beforeDate) {
+    var days = this._exDays(memberId, exerciseId), last = null, best = null;
+    Object.keys(days).forEach(function (d) {
+      if (d >= beforeDate) return;
+      var v = volumeOf(days[d]); if (v !== null && (best === null || v > best)) best = v;
+      if (days[d].some(function (s) { return !s.is_warmup; }) && (!last || d > last)) last = d;
+    });
+    if (!last) return { line: '', volume: null, best: best };
+    return { line: formatSets(days[last].filter(function (s) { return !s.is_warmup; })), volume: volumeOf(days[last]), best: best };
+  };
+  // running 합계 of one exercise block / of the whole day (always recomputed from Store data)
+  Store.prototype.exerciseVolume = function (wid, exerciseId) { return volumeOf(this.setsForWorkout(wid).filter(function (s) { return s.exercise_id === exerciseId; })); };
+  Store.prototype.dayVolume = function (memberId, date) { var w = this.workoutFor(memberId, date); return w ? volumeOf(this.setsForWorkout(w.id)) : null; };
+  // dates (ascending) on which this member has at least one live set
+  Store.prototype.recordDates = function (memberId) { return this.historyDays(memberId).map(function (d) { return d.date; }).reverse(); };
+  // nearest date before (dir < 0) / after (dir > 0) `date` that has records for this member, else null (arrow disabled)
+  Store.prototype.adjacentDay = function (memberId, date, dir) {
+    var ds = this.recordDates(memberId), i;
+    if (dir < 0) { for (i = ds.length - 1; i >= 0; i--) if (ds[i] < date) return ds[i]; }
+    else { for (i = 0; i < ds.length; i++) if (ds[i] > date) return ds[i]; }
+    return null;
+  };
+  // cardio days of the Mon-Sun week that contains `date`: {start, end, count} (count = distinct days with a cardio set)
+  Store.prototype._cardioDays = function (memberId) {
+    var g = this._dayGroups(memberId), wd = {}, days = {};
+    Object.keys(g).forEach(function (d) { g[d].ids.forEach(function (id) { wd[id] = d; }); });
+    this._liveSets().forEach(function (s) { if (has(s.minutes) && wd[s.workout_id]) days[wd[s.workout_id]] = 1; });
+    return days;
+  };
+  Store.prototype.cardioWeek = function (memberId, date) {
+    var start = weekStart(date), end = addDays(start, 6), days = this._cardioDays(memberId);
+    return { start: start, end: end, count: Object.keys(days).filter(function (d) { return d >= start && d <= end; }).length };
+  };
+  // the last n weeks (newest first) ending with the week of `today`: [{start, end, count}]
+  Store.prototype.cardioWeeks = function (memberId, today, n) {
+    var out = [], first = weekStart(today);
+    for (var i = 0; i < n; i++) out.push(this.cardioWeek(memberId, addDays(first, -7 * i)));
+    return out;
+  };
   // Weight the nudge chips start from when the weight field is empty: last set of this exercise on that day, else the
   // last working set of the previous session, else null.
   Store.prototype.nudgeBase = function (memberId, exerciseId, date) {
@@ -891,7 +1051,7 @@
     if (!(opts && opts.sets)) return res;
     var w = this.getOrCreateWorkout(toMember, toDate);
     blocks.forEach(function (b) {
-      b.sets.forEach(function (s) { res.ids.push(self.addSet(w.id, b.exercise.id, { weight: s.weight, drops: s.drops, note: s.note, is_warmup: s.is_warmup }).id); res.sets++; });
+      b.sets.forEach(function (s) { res.ids.push(self.addSet(w.id, b.exercise.id, { weight: s.weight, reps: s.reps, minutes: s.minutes, distance: s.distance, drops: s.drops, note: s.note, is_warmup: s.is_warmup }).id); res.sets++; });
     });
     return res;
   };
@@ -909,9 +1069,9 @@
     return Object.keys(last).sort(function (a, b) { return last[a] < last[b] ? 1 : -1; });
   };
   // Per-date aggregated points for one exercise across the given members.
-  Store.prototype.seriesFor = function (exerciseId, o) {
+  Store.prototype._perDate = function (exerciseId, o) {
     o = o || {};
-    var ids = o.memberIds || null, since = o.since || null, until = o.until || null, byWid = {}, wk = {};
+    var ids = o.memberIds || null, since = o.since || null, until = o.until || null, wk = {};
     this._all('workouts').forEach(function (w) {
       if (ids && ids.indexOf(w.member_id) < 0) return;
       if (since && w.date < since) return;
@@ -924,6 +1084,34 @@
       var d = wk[s.workout_id].date;
       (perDate[d] = perDate[d] || []).push(s);
     });
+    return perDate;
+  };
+  // session 합계 per date (growth chart / table); a day without any set that has weight+reps gives NO point
+  Store.prototype.volumeSeries = function (exerciseId, o) {
+    var perDate = this._perDate(exerciseId, o);
+    return Object.keys(perDate).sort().map(function (d) { var v = volumeOf(perDate[d]); return v === null ? null : { date: d, vol: v }; }).filter(Boolean);
+  };
+  // cardio per date: total minutes, total km (null when no set had a distance), number of sets
+  Store.prototype.cardioSeries = function (exerciseId, o) {
+    var perDate = this._perDate(exerciseId, o);
+    return Object.keys(perDate).sort().map(function (d) {
+      var ss = perDate[d].filter(function (s) { return has(s.minutes); }); if (!ss.length) return null;
+      var mi = 0, km = null; ss.forEach(function (s) { mi += s.minutes; if (has(s.distance)) km = (km || 0) + s.distance; });
+      return { date: d, minutes: Math.round(mi * 1000) / 1000, distance: km === null ? null : Math.round(km * 1000) / 1000, count: ss.length };
+    }).filter(Boolean);
+  };
+  // Growth table / volume rows: the UNION of the avg/max dates (seriesFor, honours includeWarmup) and the volume dates
+  // (volumeSeries: warm-ups with weight+reps always count), ascending: {date, count, avg, max, vol} (missing parts null).
+  Store.prototype.growthRows = function (exerciseId, o) {
+    var by = {};
+    function row(d) { return by[d] = by[d] || { date: d, count: null, avg: null, max: null, vol: null }; }
+    this.seriesFor(exerciseId, o).forEach(function (p) { var r = row(p.date); r.count = p.count; r.avg = p.avg; r.max = p.max; });
+    this.volumeSeries(exerciseId, o).forEach(function (p) { row(p.date).vol = p.vol; });
+    return Object.keys(by).sort().map(function (d) { return by[d]; });
+  };
+  Store.prototype.seriesFor = function (exerciseId, o) {
+    o = o || {};
+    var perDate = this._perDate(exerciseId, o);
     return Object.keys(perDate).sort().map(function (d) {
       var st = dayStats(perDate[d], { includeWarmup: o.includeWarmup });
       return st ? { date: d, count: st.count, avg: st.avg, max: st.max } : null;
@@ -990,7 +1178,21 @@
     return false;
   };
   Store.prototype.supportsChest = Store.prototype.supportsMemo;
-  Store.prototype.bodyParts = function () { var ok = this.supportsChest(); return BODY_PARTS.filter(function (b) { return ok || b !== '가슴'; }); };
+  // migration-004 (sets.reps / minutes / distance + body part 유산소): the read-only capability probe (_probeCaps, run on
+  // every load/refresh) decides; its last confirmed answer is cached in kv 'gl:caps' for offline starts. Only when nothing
+  // was ever confirmed do the loaded rows decide (a set row carrying `reps`). Before the migration, reps / cardio writes are
+  // refused locally (nothing is sent).
+  Store.prototype.supportsReps = function () {
+    if (!this.a.remote) return true;
+    if (typeof this.caps.reps === 'boolean') return this.caps.reps;
+    for (var it = this.t.sets.values(), r = it.next(); !r.done; r = it.next()) if ('reps' in r.value) return true;
+    return false;
+  };
+  Store.prototype.supportsCardio = Store.prototype.supportsReps;
+  Store.prototype.bodyParts = function () {
+    var chest = this.supportsChest(), cardio = this.supportsCardio();
+    return BODY_PARTS.filter(function (b) { return (chest || b !== '가슴') && (cardio || b !== CARDIO_PART); });
+  };
   function cleanMemo(m) {
     if (m === undefined || m === null) return '';
     if (typeof m !== 'string') throw new Error('invalid memo');
@@ -1007,6 +1209,7 @@
   Store.prototype.addExercise = function (name, bodyPart, memo) {
     name = cleanName(name); assertBodyPart(bodyPart);
     if (bodyPart === '가슴' && !this.supportsChest()) throw new Error('invalid body_part');
+    if (bodyPart === CARDIO_PART && !this.supportsCardio()) throw new Error('invalid body_part');
     memo = cleanMemo(memo);
     if (memo && !this.supportsMemo()) throw new Error('memo unsupported');
     if (this.exercises().some(function (e) { return e.name === name; })) throw new Error('duplicate exercise');
@@ -1023,6 +1226,9 @@
     if (patch.body_part !== undefined) {
       assertBodyPart(patch.body_part); n.body_part = patch.body_part;
       if (patch.body_part === '가슴' && patch.body_part !== e.body_part && !this.supportsChest()) throw new Error('invalid body_part');
+      if (patch.body_part === CARDIO_PART && patch.body_part !== e.body_part && !this.supportsCardio()) throw new Error('invalid body_part');
+      // cardio sets (minutes) and strength sets (weight) cannot share an exercise: switching kind is refused once it has sets
+      if (isCardio(e) !== isCardio(n) && Array.from(this.t.sets.values()).some(function (x) { return x.exercise_id === id; })) throw new Error('kind change: exercise has sets'); // deleted ones too (undo could bring them back)
     }
     if (patch.memo !== undefined) {
       var m = cleanMemo(patch.memo);
@@ -1047,29 +1253,45 @@
     if (dead) return this._commit('workouts', Object.assign({}, dead, { deleted: false })); // revive
     return this._newRow('workouts', { id: id, member_id: memberId, date: date, note: '', deleted: false });
   };
-  Store.prototype.addSet = function (workoutId, exerciseId, fields) {
-    var v = validateSetFields(fields);
+  // Validated set columns for this exercise (its body part decides strength vs cardio). Before migration-004 the new
+  // columns are not even put on the row (the server would refuse them); a reps/cardio value is refused locally instead.
+  Store.prototype._setValue = function (exerciseId, fields) {
+    var ex = this.exercise(exerciseId); if (!ex) throw new Error('no exercise');
+    var v = validateSetFields(fields, isCardio(ex) ? 'cardio' : null);
     if (!v.ok) throw new Error('invalid set: ' + v.error);
-    if (!this.exercise(exerciseId)) throw new Error('no exercise');
+    if (!this.supportsReps()) {
+      if (isCardio(ex)) throw new Error('cardio unsupported');
+      if (v.value.reps !== null) throw new Error('reps unsupported');
+      delete v.value.reps; delete v.value.minutes; delete v.value.distance;
+    }
+    return v.value;
+  };
+  Store.prototype.addSet = function (workoutId, exerciseId, fields) {
+    var val = this._setValue(exerciseId, fields);
     var pos = this.setsForWorkout(workoutId).reduce(function (m, s) { return Math.max(m, s.position); }, 0) + 1;
     return this._newRow('sets', Object.assign({
       workout_id: workoutId, exercise_id: exerciseId, position: pos, deleted: false
-    }, v.value));
+    }, val));
   };
   // `base` = the field values the edit form was OPENED with. Only fields the user really changed relative to it are
   // applied; the rest keep the current (possibly refreshed) value, so a background refresh never turns an untouched
   // input into a change.
+  // Fields a caller leaves out (drops, reps, minutes, distance) keep their current value: legacy drops are only ever
+  // removed by an explicit `drops: ''` (the edit sheet's clear button), never as a side effect.
   Store.prototype.updateSet = function (id, fields, base) {
     var s = this.t.sets.get(id); if (!s) throw new Error('no set');
+    function txt(v) { return v === null || v === undefined ? '' : v; }
+    var cur = { weight: txt(s.weight), reps: txt(s.reps), minutes: txt(s.minutes), distance: txt(s.distance), drops: s.drops && s.drops.length ? s.drops.join(',') : '', note: s.note, is_warmup: s.is_warmup };
     if (base) {
-      var cur = { weight: s.weight === null ? '' : s.weight, drops: s.drops && s.drops.length ? s.drops.join(',') : '', note: s.note, is_warmup: s.is_warmup }, eff = {};
+      var eff = {};
       Object.keys(fields).forEach(function (k) { eff[k] = (k in base && String(base[k]) === String(fields[k])) ? cur[k] : fields[k]; });
       fields = eff;
     }
-    var v = validateSetFields(fields);
-    if (!v.ok) throw new Error('invalid set: ' + v.error);
+    fields = Object.assign({}, fields);
+    ['drops', 'reps', 'minutes', 'distance'].forEach(function (k) { if (!(k in fields)) fields[k] = cur[k]; });
+    var val = this._setValue(s.exercise_id, fields);
     var inverse = [{ table: 'sets', prev: clone(s) }];
-    this._commit('sets', Object.assign({}, s, v.value));
+    this._commit('sets', Object.assign({}, s, val));
     return inverse;
   };
   // Soft deletes return an undo token (inverse = exact previous rows).
@@ -1103,7 +1325,7 @@
 
   // ---- export / import ----
   Store.prototype.exportData = function () {
-    var out = { app: 'gymlog', version: 2, exported_at: this.now() }, self = this;
+    var out = { app: 'gymlog', version: 3, exported_at: this.now() }, self = this;
     TABLES.forEach(function (t) { out[t] = sortById(Array.from(self.t[t].values()).map(clone)); });
     out.sets = out.sets.map(upgradeSet); // legacy 무게2 never leaves the app as a column: it is kept in the note
     return out;
@@ -1113,13 +1335,13 @@
     var n = clone(r);
     if (n.weight2 !== null && n.weight2 !== undefined) n.note = (n.note ? n.note + ' ' : '') + '무게2: ' + fmtNum(n.weight2);
     delete n.weight2;
-    if (n.drops === undefined) n.drops = null;
+    ['drops', 'reps', 'minutes', 'distance'].forEach(function (k) { if (n[k] === undefined) n[k] = null; }); // v3: every set row carries every column
     return n;
   }
   function validateImport(o, existing) {
     function bad(m) { throw new Error('import rejected: ' + m); }
     if (!o || typeof o !== 'object' || o.app !== 'gymlog') bad('not a gymlog backup');
-    if (o.version !== 1 && o.version !== 2) bad('unsupported version');
+    if (o.version !== 1 && o.version !== 2 && o.version !== 3) bad('unsupported version');
     TABLES.forEach(function (t) { if (!Array.isArray(o[t])) bad('missing table ' + t); });
     function str(v) { return typeof v === 'string' && v.length > 0; }
     o.members.forEach(function (r) { if (!r || !str(r.id) || !str(r.name) || typeof r.archived !== 'boolean') bad('member row'); });
@@ -1134,8 +1356,12 @@
     });
     o.sets.forEach(function (r) {
       if (!r || !str(r.id) || !str(r.workout_id) || !str(r.exercise_id) || typeof r.deleted !== 'boolean') bad('set row');
-      var wOk = okNum(r.weight);
-      if (!wOk && !(o.version === 2 && r.weight === null && r.is_warmup === true)) bad('set weight');
+      var wOk = okNum(r.weight), cardio = has(r.minutes);
+      if (has(r.reps) && !(Number.isInteger(r.reps) && r.reps >= 0 && r.reps <= REPS_MAX)) bad('set reps');
+      if (has(r.minutes) && !(typeof r.minutes === 'number' && Number.isFinite(r.minutes) && r.minutes >= 0 && r.minutes <= MINUTES_MAX)) bad('set minutes');
+      if (has(r.distance) && !(typeof r.distance === 'number' && Number.isFinite(r.distance) && r.distance >= 0 && r.distance <= DISTANCE_MAX)) bad('set distance');
+      if (cardio && (has(r.weight) || has(r.reps) || r.is_warmup === true || (Array.isArray(r.drops) && r.drops.length))) bad('cardio set with weight/reps');
+      if (!wOk && !(o.version >= 2 && r.weight === null && r.is_warmup === true) && !(o.version >= 3 && r.weight === null && cardio)) bad('set weight');
       if (r.drops !== undefined && r.drops !== null && !(Array.isArray(r.drops) && r.drops.every(okNum))) bad('set drops');
       if (r.is_warmup === true && Array.isArray(r.drops) && r.drops.length) bad('warm-up with drops');
       if (r.weight2 !== null && r.weight2 !== undefined && !okNum(r.weight2)) bad('set weight2');
@@ -1161,6 +1387,14 @@
     TABLES.forEach(function (t) { existing[t] = Array.from(self.t[t].keys()); });
     validateImport(o, existing);
     var rows = { members: o.members, exercises: o.exercises, workouts: o.workouts, sets: o.sets.map(upgradeSet) };
+    // R11 fix: validate the FINAL merged data before writing anything. A set is cardio iff it has minutes; it must sit under
+    // an exercise of the same kind (existing rows the backup does not contain are part of the check). Refused = nothing written.
+    var exAfter = new Map(this.t.exercises), setsAfter = new Map(this.t.sets);
+    rows.exercises.forEach(function (r) { exAfter.set(r.id, r); }); rows.sets.forEach(function (r) { setsAfter.set(r.id, r); });
+    setsAfter.forEach(function (r) {
+      var ex = exAfter.get(r.exercise_id);
+      if (ex && has(r.minutes) !== isCardio(ex)) throw new Error('import rejected: kind mismatch (' + (has(r.minutes) ? 'cardio' : 'strength') + ' set under ' + (isCardio(ex) ? 'cardio' : 'strength') + ' exercise "' + ex.name + '")');
+    });
     TABLES.forEach(function (t) { rows[t].forEach(function (r) { self._commit(t, r, false); }); });
     await this.flush();
     return TABLES.reduce(function (acc, t) { acc[t] = o[t].length; return acc; }, {});
@@ -1214,11 +1448,35 @@
     var p = dateStr.split('-').map(Number), d = new Date(p[0], p[1] - 1, p[2] + n);
     return todayStr(d);
   }
+  // Monday of the Mon-Sun week that contains dateStr
+  function weekStart(dateStr) {
+    var p = dateStr.split('-').map(Number), wd = new Date(p[0], p[1] - 1, p[2]).getDay();
+    return addDays(dateStr, wd === 0 ? -6 : 1 - wd);
+  }
+  // Month grid for the calendar sheet, Sunday first (Korean default). ym 'YYYY-MM'; marked = dates with records.
+  // -> {ym, prev, next, weeks: [[cell|null x7]...]}, cell {date, day, rec, today, past, future, label}
+  function calendarMonth(ym, today, marked) {
+    var b = rangeBounds(today, { month: ym }); // throws 'bad month'
+    var y = Number(ym.slice(0, 4)), mo = Number(ym.slice(5, 7)), last = Number(b.until.slice(8));
+    var d0 = new Date(2000, 0, 1); d0.setFullYear(y, mo - 1, 1);
+    var rec = {}; (marked || []).forEach(function (d) { rec[d] = 1; });
+    var cells = []; for (var i = 0; i < d0.getDay(); i++) cells.push(null);
+    for (var d = 1; d <= last; d++) {
+      var ds = ym + '-' + (d < 10 ? '0' : '') + d, c = { date: ds, day: d, rec: !!rec[ds], today: ds === today, past: ds < today, future: ds > today };
+      c.label = mo + '월 ' + d + '일' + (c.today ? ' 오늘' : '') + (c.rec ? ' 기록 있음' : c.past ? ' 기록 없음' : '');
+      cells.push(c);
+    }
+    while (cells.length % 7) cells.push(null);
+    var weeks = []; for (var k = 0; k < cells.length; k += 7) weeks.push(cells.slice(k, k + 7));
+    function shift(n) { var yy = y, mm = mo + n; if (mm < 1) { mm = 12; yy--; } if (mm > 12) { mm = 1; yy++; } return String(yy).padStart(4, '0') + '-' + (mm < 10 ? '0' : '') + mm; }
+    return { ym: ym, prev: shift(-1), next: shift(1), weeks: weeks };
+  }
 
   return {
     BODY_PARTS: BODY_PARTS, SEED_EXERCISES: SEED_EXERCISES, parseSetLine: parseSetLine, parseLines: parseLines,
     suggestBodyPart: suggestBodyPart, PhotoStore: PhotoStore, MemCache: MemCache, fitSize: fitSize, validThumb: validThumb, PHOTO_MAX_CHARS: PHOTO_MAX_CHARS, formatSet: formatSet, formatSets: formatSets, nudge: nudge, validateSetFields: validateSetFields, dayStats: dayStats, groupByBodyPart: groupByBodyPart,
     delta: delta, MemoryStorage: MemoryStorage, LocalAdapter: LocalAdapter, SupabaseAdapter: SupabaseAdapter,
-    SbClient: SbClient, SupabaseAuth: SupabaseAuth, emailFor: emailFor, Store: Store, LocalAuth: LocalAuth, sha256Hex: sha256Hex, workoutId: workoutId, rangeBounds: rangeBounds, validDate: validDate, validateImport: validateImport, todayStr: todayStr, addDays: addDays
+    SbClient: SbClient, SupabaseAuth: SupabaseAuth, emailFor: emailFor, Store: Store, LocalAuth: LocalAuth, sha256Hex: sha256Hex, workoutId: workoutId, rangeBounds: rangeBounds, validDate: validDate, validateImport: validateImport, todayStr: todayStr, addDays: addDays,
+    volumeOf: volumeOf, fmtVolume: fmtVolume, lastLineText: lastLineText, weekStart: weekStart, calendarMonth: calendarMonth, isCardio: isCardio, CARDIO_PART: CARDIO_PART, CARDIO_GOAL: CARDIO_GOAL
   };
 });
