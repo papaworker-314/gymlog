@@ -231,7 +231,7 @@
   setInterval(function () { if (document.visibilityState !== 'hidden') restTick(); }, 1000);
   function headerHtml(noChips) {
     var members = store.members();
-    return '<div id="robanner" class="banner"' + (roNow() ? '' : ' hidden') + '>다른 창에서 열려 있어요. 그 창을 닫거나 잠시 기다리면 여기서 이어서 쓸 수 있어요. (지금은 보기만 가능해요)</div>' +
+    return (noChips ? '' : '<div class="stickyhead">') + '<div id="robanner" class="banner"' + (roNow() ? '' : ' hidden') + '>다른 창에서 열려 있어요. 그 창을 닫거나 잠시 기다리면 여기서 이어서 쓸 수 있어요. (지금은 보기만 가능해요)</div>' +
       '<div id="offbanner" class="banner"' + (store.offline ? '' : ' hidden') + '>오프라인이에요. 저장된 기록으로 열었고, 새 기록은 연결되면 자동으로 올라가요.</div>' +
       '<div class="top"><div id="savestate" class="save ' + store.status + '"></div>' +
       '<div class="topbtns">' + (photos && (photos.available() || Object.keys(photos.recs).length) ? '<button class="pill' + (showPhotos() ? ' on' : '') + '" data-act="eye" aria-label="사진 보기" aria-pressed="' + showPhotos() + '">' + (showPhotos() ? '사진 켜짐' : '사진 꺼짐') + '</button>' : '') +
@@ -239,7 +239,7 @@
       '<button data-act="gear" aria-label="설정">⚙ 설정</button></div></div>' +
       (noChips ? '' : '<div class="memrow"><div class="chips" id="memberchips">' + members.map(function (m) {
         return '<button class="chip' + (m.id === S.view ? ' on' : '') + '" data-act="member" data-id="' + esc(m.id) + '">' + esc(m.name) + '</button>';
-      }).join('') + '</div><button class="primary addexbtn" data-act="addex">＋ 운동 추가</button></div>'); // the add button fills the rest of the member row (R11)
+      }).join('') + '</div><button class="primary addexbtn" data-act="addex">＋ 운동 추가</button></div></div>'); // R14: </div> closes .stickyhead; the add button fills the rest of the member row (R11)
   }
 
   // legacy drops (before round 11) stay readable, muted like legacy weight2: `(드롭 20,10)`
@@ -595,11 +595,12 @@
         '<div class="row" style="margin-top:8px"><button class="grow" data-act="gear">뒤로</button><button class="grow" data-act="close">닫기</button></div>';
     } else if (s.type === 'exercises') { // R13: search (IME-safe), one card per exercise, active first, 보관한 운동 below, 삭제한 운동 at the bottom
       var all = store.manageExercises(), act = all.filter(function (e) { return !e.archived; }), arc = all.filter(function (e) { return e.archived; }), del = store.supportsDelete() ? store.deletedExercises() : [];
-      h = '<h2>운동 관리</h2><input id="eq" placeholder="운동 검색 (이름 · 부위)" autocomplete="off" value="' + esc(s.q || '') + '"><div class="err" id="serr">' + esc(s.err || '') + '</div>' +
+      h = '<div class="mgtitle"><h2>운동 관리</h2><button class="primary" data-act="eaddopen" aria-expanded="false">＋ 운동 추가</button></div>' + // R14: add form opens right under the title
+        '<div id="addbox" class="mgcard addbox" hidden><input id="nxn" placeholder="운동 이름" autocomplete="off">' + bpChips(s.bp) + memoInput('nxm', '') +
+        '<div class="row"><button class="grow" data-act="eaddclose">취소</button><button class="grow primary" data-act="eadd">추가</button></div></div>' +
+        '<input id="eq" placeholder="운동 검색 (이름 · 부위)" autocomplete="off" value="' + esc(s.q || '') + '"><div class="err" id="serr">' + esc(s.err || '') + '</div>' +
         '<div class="list" id="exlist">' + act.map(exCard).join('') + '<div class="muted" id="exnone" hidden>검색 결과가 없어요.</div>' +
         (arc.length ? '<h3 class="mghead" id="archead">보관한 운동 <span class="muted">(목록에서 숨김 · 복원 가능)</span></h3>' + arc.map(exCard).join('') : '') + '</div>' +
-        '<h2>운동 추가</h2><input id="nxn" placeholder="운동 이름" autocomplete="off">' + bpChips(s.bp) + memoInput('nxm', '') +
-        '<button class="primary" style="width:100%" data-act="eadd">추가</button>' +
         (del.length ? '<h3 class="mghead" id="delhead">삭제한 운동 <span class="muted">(기록은 그대로 있어요)</span></h3><div id="dellist">' + del.map(function (e) {
           return '<div class="mgcard deleted" data-delid="' + esc(e.id) + '"><div class="mname">' + exName(e) + badge(e) + '</div><div class="mgbtns"><button data-act="erestore" data-id="' + esc(e.id) + '">되살리기</button></div></div>';
         }).join('') + '</div>' : '') +
@@ -612,6 +613,15 @@
     $sheet.innerHTML = '<div class="panel" role="dialog" aria-modal="true">' + h + '</div>';
     $sheet.hidden = false;
     if (s.type === 'exercises' && s.q) filterManage(s.q);
+    if (s.type === 'exercises' && s.added) { // R14: show + highlight the card just added
+      var nc = $sheet.querySelector('#exlist [data-exid="' + s.added + '"]'); if (nc) { nc.classList.add('justadded'); nc.scrollIntoView({ block: 'center' }); }
+    }
+  }
+  // R14: the add form is shown/hidden in place (no re-render: the search box and unsaved card edits stay as they are)
+  function addBox(open) {
+    var b = $('addbox'); if (!b) return false; if (b.hidden === !open) return false;
+    b.hidden = !open; var o = $sheet.querySelector('[data-act=eaddopen]'); if (o) o.setAttribute('aria-expanded', String(!!open));
+    if (open) { var n = $('nxn'); if (n) n.focus(); } return true;
   }
 
   // ---------------- actions ----------------
@@ -813,9 +823,11 @@
     bpsel: function (d) { S.sheet.bp = d.bp; S.sheet.bpPicked = true; markChips(); },
     eadd: function () {
       if (!S.sheet.bp) { setErr('serr', '부위를 골라 주세요.'); return; }
-      var ok = guard(function () { store.addExercise($('nxn').value, S.sheet.bp, $('nxm') ? $('nxm').value : ''); return true; });
-      if (ok) { openSheet({ type: 'exercises' }); changed(); }
+      var ok = guard(function () { return store.addExercise($('nxn').value, S.sheet.bp, $('nxm') ? $('nxm').value : ''); });
+      if (ok) { openSheet({ type: 'exercises', added: ok.id }); changed(); } // R14: the new card is shown + highlighted
     },
+    eaddopen: function () { addBox($('addbox').hidden); },
+    eaddclose: function () { addBox(false); },
     esave: function (d) {
       var n = document.querySelector('[data-exname="' + d.id + '"]').value, b = document.querySelector('[data-exbp="' + d.id + '"]').value;
       var mi = document.querySelector('[data-exmemo="' + d.id + '"]'), patch = { name: n, body_part: b }; if (mi) patch.memo = mi.value;
@@ -873,6 +885,8 @@
 
   document.addEventListener('click', function (ev) {
     if (ev.target === $sheet) { closeSheet(); return; }
+    var ab = $('addbox'); // R14: a tap outside the open add form closes it without adding
+    if (ab && !ab.hidden && !ab.contains(ev.target) && !ev.target.closest('[data-act=eaddopen]')) { addBox(false); return; }
     var el = ev.target.closest('[data-act]'); if (!el) return;
     var act = el.getAttribute('data-act');
     if (roNow() && WRITE_ACTS.indexOf(act) >= 0) { toast('다른 창에서 열려 있어서 지금은 보기만 가능해요.'); return; }
@@ -935,7 +949,7 @@
     else if (id === 'gcex') { S.g.cExId = ev.target.value; render(); }
   });
   document.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Escape' && S.sheet) closeSheet();
+    if (ev.key === 'Escape' && S.sheet) { if (!addBox(false)) closeSheet(); } // R14: Esc closes the open add form first
     if (ev.key === 'Enter' && ev.target.matches && ev.target.matches('.entry input')) {
       var card = ev.target.closest('.card'); // the edit sheet has no card: Enter there saves the edit
       var b = card && card.querySelector('[data-act="addset"]'); if (b) b.click();
