@@ -134,6 +134,20 @@ select.chip { appearance: none; -webkit-appearance: none; padding-right: 16px; }
 .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; justify-items: center; }
 .cal-wd { font-size: 13px; color: var(--muted); padding: 4px 0; }
 .cal-d { width: 44px; height: 44px; min-width: 44px; padding: 0; border-radius: 50%; border: 2px solid transparent; background: transparent; font-size: 15px; }
+/* R12: record days list the trained body parts (max 2 labels + "+n", see GL.partLabels); cells grow taller, never wider */
+.cal-grid.parts .cal-d { width: 100%; max-width: 52px; height: auto; min-height: 70px; border-radius: 10px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding: 3px 0 2px; overflow: hidden; }
+.cal-d .cal-n { line-height: 18px; }
+.cal-d .cal-p { display: block; max-width: 100%; font-size: 10px; line-height: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; }
+.pickhead { margin: 10px 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
+#calday .cdpart h3 { margin: 10px 0 4px; font-size: 14px; }
+#calday .cditem { padding: 6px 0; border-bottom: 1px solid var(--line, rgba(127,127,127,.2)); overflow-wrap: anywhere; }
+#calday .cdsets { margin-left: 4px; }
+/* R12 맨몸 entry: [횟수|초][숫자][+무게 | 무게] / [메모][추가] (same grid as the strength row) */
+.entry.bw .bwbtn, .entry.bw .bwmode { font-size: 14px; padding: 0; }
+.besttag { background: var(--rec); color: #fff; margin-right: 6px; white-space: nowrap; }
+.rest { margin-left: 6px; font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.friendday { width: 100%; margin: 4px 0; }
+
 .cal-d.past { background: var(--past); color: var(--muted); }
 .cal-d.rec { background: var(--rec); color: #fff; font-weight: 700; }
 .cal-d.today { border-color: var(--text); }

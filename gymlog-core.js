@@ -7,10 +7,14 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var BODY_PARTS = ['이두', '삼두', '가슴', '어깨', '등', '복근', '하체', '유산소', '기타']; // 가슴 needs migration-002, 유산소 migration-004 (Store.supportsChest / supportsCardio)
+  var BODY_PARTS = ['이두', '삼두', '가슴', '어깨', '등', '복근', '하체', '맨몸', '유산소', '기타']; // 가슴 needs migration-002, 유산소 migration-004, 맨몸 migration-005 (Store.supportsChest / supportsCardio / supportsBodyweight)
   var CARDIO_PART = '유산소'; // the one body part whose exercises are cardio (minutes + distance instead of weight + reps)
+  var BW_PART = '맨몸'; // R12: bodyweight exercises log reps only (weight optional: weighted pull-ups); kind 'bw'
   var CARDIO_GOAL = 2; // default weekly cardio goal (days per Mon-Sun week); the app passes config.cardioGoal when set
   function isCardio(ex) { return !!ex && ex.body_part === CARDIO_PART; }
+  function isBodyweight(ex) { return !!ex && ex.body_part === BW_PART; }
+  // the entry kind of an exercise, decided by its body part: 'cardio' (분/km), 'bw' (횟수, weight optional) or 'str' (무게/횟수)
+  function kindOf(ex) { return isCardio(ex) ? 'cardio' : isBodyweight(ex) ? 'bw' : 'str'; }
   var MEMO_MAX = 200;
   var SEED_EXERCISES = [
     { name: '트라이셉스벤치프레스', body_part: '삼두' },
@@ -40,6 +44,9 @@
   var REPS = '(?:\\s*\\(\\s*(\\d+)\\s*\\))?';
   var WARM_RE = new RegExp('^(' + WARMUP_WORDS.join('|') + ')(?:\\s+' + NUM + ')?' + REPS + '$');
   var WORK_RE = new RegExp('^' + NUM + REPS + '$');
+  var SEC_RE = /^(\d+)\s*초$/, SECONDS_MAX = 3600; // R12 pass 2: `60초` = a timed-hold set (맨몸, e.g. plank), integer 1..3600
+  function okSec(n) { return Number.isInteger(n) && n >= 1 && n <= SECONDS_MAX; }
+  var REPONLY_RE = /^\(\s*(\d+)\s*\)$/; // R12: `(15)` = a reps-only set (맨몸); the exercise kind decides whether it is allowed
   var REPS_MAX = 1000;
   function okReps(n) { return Number.isInteger(n) && n >= 1 && n <= REPS_MAX; }
   var KO_DROPS = '드롭은 이제 따로 기록해요 — 괄호 안에는 횟수만 써요 (예: 60(12))';
@@ -65,6 +72,16 @@
         if (m[2] !== undefined && !okReps(Number(m[2]))) return perr('reps out of range ' + cut, KO_REPS);
         sets.push({ is_warmup: false, weight: Number(m[1]), reps: m[2] === undefined ? null : Number(m[2]), drops: null, note: '' }); continue;
       }
+      m = SEC_RE.exec(tk);
+      if (m) {
+        if (!okSec(Number(m[1]))) return perr('seconds out of range ' + cut, '초는 1~3600 사이의 정수예요 (예: 60초)');
+        sets.push({ is_warmup: false, weight: null, reps: null, seconds: Number(m[1]), drops: null, note: '' }); continue;
+      }
+      m = REPONLY_RE.exec(tk);
+      if (m) {
+        if (!okReps(Number(m[1]))) return perr('reps out of range ' + cut, KO_REPS);
+        sets.push({ is_warmup: false, weight: null, reps: Number(m[1]), drops: null, note: '' }); continue;
+      }
       if (/\([^)]*,/.test(tk)) return perr('old drop syntax ' + cut, KO_DROPS); // `25(20,10)`: never reinterpreted
       if (/\(\s*\d*\.\d*\s*\)?$/.test(tk)) return perr('reps not an integer ' + cut, KO_REPS);
       return /^[^\d()\-,.\s]+$/.test(tk) ? perr('unknown word "' + tk + '"', '모르는 말이에요 "' + tk + '"') : perr('cannot read ' + cut, '읽을 수 없어요 ' + cut);
@@ -89,12 +106,15 @@
   // one set in the notebook format: `웜업`, `웜업 40(15)`, `60`, `60(12)`; cardio `30분 · 5.2km`.
   // Legacy drops are NOT written into this text any more (they are shown separately, muted, and kept in the data).
   function formatSet(s) {
+    if (has(s.seconds)) return (has(s.weight) ? fmtNum(s.weight) + ' ' : '') + s.seconds + '초';
     if (has(s.minutes)) return fmtNum(s.minutes) + '분' + (has(s.distance) ? ' · ' + fmtNum(s.distance) + 'km' : '');
     var w = has(s.weight) ? fmtNum(s.weight) : '', r = has(s.reps) ? '(' + s.reps + ')' : '';
     if (s.is_warmup) return '웜업' + (w ? ' ' + w : '') + r;
     return w + r;
   }
   function formatSets(list) { return list.map(formatSet).join(' - '); }
+  // what the screens show for one set (R12): like formatSet, but a reps-only set reads `15회` instead of `(15)`
+  function displaySet(s) { return has(s.seconds) ? formatSet(s) : !has(s.minutes) && !has(s.weight) && !s.is_warmup && has(s.reps) ? s.reps + '회' : formatSet(s); }
   // weight chips (+2.5/+5/-2.5): `cur` is the field text; empty/unreadable -> `fallback` (or 0). Never below 0 or above MAX_NUM.
   function nudge(cur, delta, fallback) {
     var t = String(cur === undefined || cur === null ? '' : cur).trim(), base = /^\d+(\.\d+)?$/.test(t) ? Number(t) : (fallback === null || fallback === undefined ? 0 : Number(fallback));
@@ -116,6 +136,8 @@
       return Number(s);
     }
     function int(v) { if (!filled(v)) return null; var s = String(v).trim(); return /^\d+$/.test(s) ? Number(s) : NaN; }
+    var sec = int(f.seconds), secGiven = filled(f.seconds);
+    if (secGiven && kind !== 'bw') return { ok: false, error: kind === 'cardio' ? 'cardio' : 'seconds' }; // seconds belong to 맨몸 exercises
     var note = String(f.note || '').trim(), dropsGiven = Array.isArray(f.drops) ? f.drops.length > 0 : filled(f.drops);
     if (kind === 'cardio') {
       if (f.is_warmup || filled(f.weight) || filled(f.reps) || dropsGiven) return { ok: false, error: 'cardio' };
@@ -125,6 +147,13 @@
     }
     if (filled(f.minutes) || filled(f.distance)) return { ok: false, error: 'minutes' }; // minutes belong to cardio exercises
     var reps = int(f.reps); if (reps !== null && !okReps(reps)) return { ok: false, error: 'reps' };
+    if (kind === 'bw') { // 맨몸: reps required, weight optional (+무게), no warm-up, no drops
+      if (f.is_warmup || dropsGiven) return { ok: false, error: 'bw' };
+      if (secGiven && (reps !== null || !okSec(sec))) return { ok: false, error: 'seconds' }; // one set = 횟수 OR 초
+      if (reps === null && !secGiven) return { ok: false, error: 'reps' };
+      var bw = num(f.weight); if (bw !== null && !okNum(bw)) return { ok: false, error: 'weight' };
+      return { ok: true, value: { is_warmup: false, weight: bw, reps: reps, seconds: secGiven ? sec : null, minutes: null, distance: null, drops: null, note: note } };
+    }
     var warm = !!f.is_warmup, w = num(f.weight);
     if (w !== null && !okNum(w)) return { ok: false, error: 'weight' };
     if (w === null && !warm) return { ok: false, error: 'weight' };
@@ -154,6 +183,25 @@
     });
     return any ? Math.round(sum * 1000) / 1000 : null;
   }
+  // total reps (맨몸 blocks show `총 45회` instead of a 합계): sum over sets with reps, none -> null
+  function totalReps(sets) {
+    var sum = 0, any = false;
+    sets.forEach(function (s) { if (!s.deleted && has(s.reps) && Number.isFinite(s.reps)) { sum += s.reps; any = true; } });
+    return any ? sum : null;
+  }
+  function totalSeconds(sets) {
+    var sum = 0, any = false;
+    sets.forEach(function (s) { if (!s.deleted && has(s.seconds) && Number.isFinite(s.seconds)) { sum += s.seconds; any = true; } });
+    return any ? sum : null;
+  }
+  // 135 -> `2분 15초`, 60 -> `1분`, 45 -> `45초`
+  function fmtDuration(sec) { var m = Math.floor(sec / 60), r = sec % 60; return m ? m + '분' + (r ? ' ' + r + '초' : '') : r + '초'; }
+  // 맨몸 block total: `총 20회`, `총 2분 15초`, both: `총 10회 · 2분 15초`; nothing -> ''
+  function bwTotalText(sets) {
+    var r = totalReps(sets), sc = totalSeconds(sets);
+    if (r === null && sc === null) return '';
+    return '총 ' + (r !== null ? r + '회' : '') + (r !== null && sc !== null ? ' · ' : '') + (sc !== null ? fmtDuration(sc) : '');
+  }
   // unit-less number with thousands separators: 1,420 / 150.5
   function fmtVolume(v) {
     var r = Math.round(Number(v) * 1000) / 1000, p = String(Math.abs(r)).split('.');
@@ -164,6 +212,7 @@
   // session had no set with reps (literal reading of ROUND11 §1).
   function lastLineText(info) {
     if (!info || !info.line) return '';
+    if (info.bw) return info.line + (info.total ? ' · ' + info.total : ''); // R12 맨몸: `15회 - 12회 · 총 27회`
     if (info.volume === null || info.volume === undefined) return info.line;
     return info.line + ' · 합계 ' + fmtVolume(info.volume) + (has(info.best) ? ' · 최고 ' + fmtVolume(info.best) : '');
   }
@@ -251,7 +300,7 @@
     members: ['id', 'name', 'archived'],
     exercises: ['id', 'name', 'body_part', 'archived', 'memo'], // memo exists only after migration-002: it is sent only when set/changed, and only if the server rows carry it
     workouts: ['id', 'member_id', 'date', 'note', 'deleted'],
-    sets: ['id', 'workout_id', 'exercise_id', 'position', 'is_warmup', 'weight', 'drops', 'note', 'deleted', 'updated_at', 'reps', 'minutes', 'distance'] // reps/minutes/distance exist only after migration-004: rows carry them only when the server does (Store.supportsReps)
+    sets: ['id', 'workout_id', 'exercise_id', 'position', 'is_warmup', 'weight', 'drops', 'note', 'deleted', 'updated_at', 'reps', 'minutes', 'distance', 'seconds'] // reps/minutes/distance exist only after migration-004, seconds after 005: rows carry them only when the server does (Store.supportsReps)
   };
   function codeErr(code, msg, extra) { var e = new Error(msg || code); e.code = code; if (extra) Object.keys(extra).forEach(function (k) { e[k] = extra[k]; }); return e; }
 
@@ -372,7 +421,7 @@
   // work on a server that does not have those columns yet.
   function newRowBody(table, row) {
     var b = pickCols(table, row);
-    if (table === 'sets') ['drops', 'reps', 'minutes', 'distance'].forEach(function (c) { if (b[c] === null) delete b[c]; });
+    if (table === 'sets') ['drops', 'reps', 'minutes', 'distance', 'seconds'].forEach(function (c) { if (b[c] === null) delete b[c]; });
     return b;
   }
   // `changed` = columns the user changed on an EXISTING row: only those are PATCHed (never a whole-row overwrite, never
@@ -408,12 +457,28 @@
   // -> {reps:true} (columns exist) | {reps:false} (PostgREST says the column does not exist) | null (anything else: unknown).
   // Network / auth errors throw from rest(); the Store treats every non-answer as "keep the last confirmed value".
   SupabaseAdapter.prototype.probeCaps = async function () {
+    var out = { reps: null, bw: null };
     var r = await this.c.rest('GET', '/rest/v1/sets?select=reps,minutes,distance&limit=0');
-    if (r.ok) return { reps: true };
-    if (r.status === 400) {
+    if (r.ok) out.reps = true;
+    else if (r.status === 400) {
       var j = null; try { j = await r.json(); } catch (e) { /* no body */ }
       var code = j && j.code ? String(j.code) : '', msg = j && j.message ? String(j.message) : '';
-      if (code === '42703' || code === 'PGRST204' || code === 'PGRST100' || /column .* does not exist/i.test(msg)) return { reps: false };
+      if (code === '42703' || code === 'PGRST204' || code === 'PGRST100' || /column .* does not exist/i.test(msg)) out.reps = false;
+    }
+    out.bw = await this.probeSchema5();
+    return out.reps === null && out.bw === null ? null : out;
+  };
+  // R12 migration-005 (body part 맨몸 + reps-only working sets) changes only CHECK constraints, which REST cannot see, so the
+  // migration also adds a read-only STABLE function: GET /rest/v1/rpc/gymlog_schema_version -> 5. true = 200 with a number >= 5;
+  // false = confirmed missing (404 PGRST202 / "Could not find the function"); null = anything else (unknown: keep the cached value).
+  SupabaseAdapter.prototype.probeSchema5 = async function () {
+    var r; try { r = await this.c.rest('GET', '/rest/v1/rpc/gymlog_schema_version'); }
+    catch (e) { if (e && e.code === 'AUTH') throw e; return null; }
+    var j = null; try { j = await r.json(); } catch (e) { /* no body */ }
+    if (r.ok) return typeof j === 'number' && j >= 5;
+    if (r.status === 404) {
+      var code = j && j.code ? String(j.code) : '', msg = j && j.message ? String(j.message) : '';
+      if (code === 'PGRST202' || /could not find the function/i.test(msg)) return false;
     }
     return null;
   };
@@ -622,12 +687,23 @@
     try { var list = await this.a.listTombs(); this.tombs = new Map(list.map(function (r) { return [r.id, r]; })); }
     catch (e) { /* keep what we had: the order key degrades to live + local rows, nothing else depends on it */ }
   };
-  function readCaps(kv) { try { var c = JSON.parse(kv.getItem('gl:caps')); return c && typeof c.reps === 'boolean' ? { reps: c.reps } : {}; } catch (e) { return {}; } }
+  function readCaps(kv) {
+    try {
+      var c = JSON.parse(kv.getItem('gl:caps')), o = {};
+      if (c && typeof c.reps === 'boolean') o.reps = c.reps;
+      if (c && typeof c.bw === 'boolean') o.bw = c.bw; // R12: migration-005 (맨몸)
+      return o;
+    } catch (e) { return {}; }
+  }
+  // Each capability keeps its last CONFIRMED value independently: an unknown answer (5xx, network) never overwrites it.
   Store.prototype._probeCaps = async function () {
     if (!this.a.probeCaps) return;
     var r; try { r = await this.a.probeCaps(); } catch (e) { return; } // network / auth: keep the last confirmed value
-    if (!r || typeof r.reps !== 'boolean') return; // 5xx / unexpected: unknown, keep
-    this.caps = { reps: r.reps };
+    if (!r) return; // 5xx / unexpected: unknown, keep
+    var c = Object.assign({}, this.caps), changed = false;
+    ['reps', 'bw'].forEach(function (k) { if (typeof r[k] === 'boolean') { c[k] = r[k]; changed = true; } });
+    if (!changed) return;
+    this.caps = c;
     try { this.kv.setItem('gl:caps', JSON.stringify(this.caps)); } catch (e) { /* quota: memory only */ }
   };
 
@@ -773,9 +849,9 @@
   Store.prototype.refresh = async function () {
     var ver = this._ver, fresh = {}, self = this;
     for (var i = 0; i < TABLES.length; i++) fresh[TABLES[i]] = await this.a.list(TABLES[i]);
-    var capsBefore = this.caps.reps; await this._probeCaps(); await this._loadTombs();
+    var capsBefore = this.caps.reps, bwBefore = this.caps.bw; await this._probeCaps(); await this._loadTombs();
     if (ver !== this._ver) return false;
-    var changed = this.offline || capsBefore !== this.caps.reps;
+    var changed = this.offline || capsBefore !== this.caps.reps || bwBefore !== this.caps.bw;
     this.offline = false;
     TABLES.forEach(function (t) {
       var m = new Map(fresh[t].map(function (r) { return [r.id, r]; }));
@@ -1001,11 +1077,54 @@
       if (days[d].some(function (s) { return !s.is_warmup; }) && (!last || d > last)) last = d;
     });
     if (!last) return { line: '', volume: null, best: best };
+    if (isBodyweight(this.exercise(exerciseId))) { // R12 맨몸: no 합계/최고 (weight is optional); display format + total reps
+      var ws = days[last].filter(function (s) { return !s.is_warmup; });
+      return { bw: true, line: ws.map(displaySet).join(' - '), volume: null, best: null, reps: totalReps(ws), total: bwTotalText(ws) };
+    }
     return { line: formatSets(days[last].filter(function (s) { return !s.is_warmup; })), volume: volumeOf(days[last]), best: best };
   };
   // running 합계 of one exercise block / of the whole day (always recomputed from Store data)
-  Store.prototype.exerciseVolume = function (wid, exerciseId) { return volumeOf(this.setsForWorkout(wid).filter(function (s) { return s.exercise_id === exerciseId; })); };
-  Store.prototype.dayVolume = function (memberId, date) { var w = this.workoutFor(memberId, date); return w ? volumeOf(this.setsForWorkout(w.id)) : null; };
+  // R12: 맨몸 exercises never count in 합계 (block or day); they show 총 N회 instead (exerciseReps)
+  Store.prototype.exerciseVolume = function (wid, exerciseId) { return isBodyweight(this.exercise(exerciseId)) ? null : volumeOf(this.setsForWorkout(wid).filter(function (s) { return s.exercise_id === exerciseId; })); };
+  Store.prototype.exerciseTotalText = function (wid, exerciseId) { return isBodyweight(this.exercise(exerciseId)) ? bwTotalText(this.setsForWorkout(wid).filter(function (s) { return s.exercise_id === exerciseId; })) : ''; };
+  // R12 pass 2: the 맨몸 entry mode follows the unit of this member's LAST set of this exercise ('sec' | 'reps'): no stored
+  // setting, no migration, same on every device. The UI may override it until the next render of another day.
+  Store.prototype.bwMode = function (memberId, exerciseId) {
+    var days = this._exDays(memberId, exerciseId), ds = Object.keys(days).sort(), last = ds.length ? days[ds[ds.length - 1]] : [];
+    var s = last[last.length - 1]; return s && has(s.seconds) ? 'sec' : 'reps';
+  };
+  Store.prototype.exerciseReps = function (wid, exerciseId) { return isBodyweight(this.exercise(exerciseId)) ? totalReps(this.setsForWorkout(wid).filter(function (s) { return s.exercise_id === exerciseId; })) : null; };
+  Store.prototype.dayVolume = function (memberId, date) {
+    var w = this.workoutFor(memberId, date), self = this;
+    return w ? volumeOf(this.setsForWorkout(w.id).filter(function (s) { return !isBodyweight(self.exercise(s.exercise_id)); })) : null;
+  };
+  // R12 calendar: {date: [body parts trained that day, BODY_PARTS order, distinct]} for one member (live sets only)
+  Store.prototype.dayParts = function (memberId) {
+    var g = this._dayGroups(memberId), wd = {}, out = {}, self = this;
+    Object.keys(g).forEach(function (d) { g[d].ids.forEach(function (id) { wd[id] = d; }); });
+    this._liveSets().forEach(function (s) {
+      var d = wd[s.workout_id], ex = self.exercise(s.exercise_id); if (!d || !ex) return;
+      var l = out[d] = out[d] || []; if (l.indexOf(ex.body_part) < 0) l.push(ex.body_part);
+    });
+    Object.keys(out).forEach(function (d) { out[d].sort(function (a, b) { return BODY_PARTS.indexOf(a) - BODY_PARTS.indexOf(b); }); });
+    return out;
+  };
+  // R12 day popup: [{part, items: [{exercise, sets, texts, total}]}] grouped by body part (BODY_PARTS order), blocks in
+  // logged order inside a part; total = `합계 1,420` (strength, '' when nothing countable) / `총 45회` (맨몸) / `총 30분 · 5.2km` (cardio)
+  Store.prototype.dayDetail = function (memberId, date) {
+    var w = this.workoutFor(memberId, date); if (!w) return [];
+    var groups = {};
+    this.blocksForWorkout(w.id).forEach(function (b) {
+      var k = kindOf(b.exercise), total = '';
+      if (k === 'bw') total = bwTotalText(b.sets);
+      else if (k === 'cardio') {
+        var mi = 0, km = null; b.sets.forEach(function (x) { if (has(x.minutes)) mi += x.minutes; if (has(x.distance)) km = (km || 0) + x.distance; });
+        total = '총 ' + fmtNum(Math.round(mi * 1000) / 1000) + '분' + (km === null ? '' : ' · ' + fmtNum(Math.round(km * 1000) / 1000) + 'km');
+      } else { var v = volumeOf(b.sets); total = v === null ? '' : '합계 ' + fmtVolume(v); }
+      (groups[b.exercise.body_part] = groups[b.exercise.body_part] || []).push({ exercise: b.exercise, sets: b.sets, texts: b.sets.map(displaySet), total: total });
+    });
+    return BODY_PARTS.filter(function (p) { return groups[p]; }).map(function (p) { return { part: p, items: groups[p] }; });
+  };
   // dates (ascending) on which this member has at least one live set
   Store.prototype.recordDates = function (memberId) { return this.historyDays(memberId).map(function (d) { return d.date; }).reverse(); };
   // nearest date before (dir < 0) / after (dir > 0) `date` that has records for this member, else null (arrow disabled)
@@ -1189,9 +1308,16 @@
     return false;
   };
   Store.prototype.supportsCardio = Store.prototype.supportsReps;
+  // R12 migration-005 (body part 맨몸 + working sets with reps and no weight). The rpc probe decides (cached in kv 'gl:caps');
+  // never confirmed -> a loaded 맨몸 exercise proves it (the server could not hold one otherwise); else unsupported (safe).
+  Store.prototype.supportsBodyweight = function () {
+    if (!this.a.remote) return true;
+    if (typeof this.caps.bw === 'boolean') return this.caps.bw;
+    return this._all('exercises', true).some(isBodyweight);
+  };
   Store.prototype.bodyParts = function () {
-    var chest = this.supportsChest(), cardio = this.supportsCardio();
-    return BODY_PARTS.filter(function (b) { return (chest || b !== '가슴') && (cardio || b !== CARDIO_PART); });
+    var chest = this.supportsChest(), cardio = this.supportsCardio(), bw = this.supportsBodyweight() && cardio;
+    return BODY_PARTS.filter(function (b) { return (chest || b !== '가슴') && (cardio || b !== CARDIO_PART) && (bw || b !== BW_PART); });
   };
   function cleanMemo(m) {
     if (m === undefined || m === null) return '';
@@ -1199,37 +1325,54 @@
     m = m.trim(); if (m.length > MEMO_MAX) throw new Error('memo too long'); return m;
   }
   // Client-side hint only (never written): first matching rule wins, so 트라이셉스벤치프레스 is 삼두, 레그컬 is 하체.
-  var HINTS = [['삼두', ['트라이셉스', '푸쉬다운', '푸시다운', '킥백']], ['하체', ['레그', '스쿼트', '런지']], ['이두', ['컬']], ['어깨', ['사레레', '숄더', '레터럴']],
+  // R12: 맨몸 words come FIRST (푸쉬업 used to hint 가슴, 풀업/턱걸이 등); `allowed` (the parts the server accepts) skips a rule
+  // whose part is not available, so before migration-005 the old hints still apply. 플랭크 (a timed hold) has no hint.
+  var SEC_WORDS = ['플랭크', '월싯', '행잉']; // timed holds: 맨몸 in 초 mode
+  var HINTS = [['맨몸', ['플랭크', '월싯', '행잉', '푸쉬업', '푸시업', '팔굽혀펴기', '턱걸이', '풀업', '친업', '딥스', '윗몸일으키기', '싯업', '버피']],
+    ['삼두', ['트라이셉스', '푸쉬다운', '푸시다운', '킥백']], ['하체', ['레그', '스쿼트', '런지']], ['이두', ['컬']], ['어깨', ['사레레', '숄더', '레터럴']],
     ['등', ['풀업', '로우', '랫풀', '턱걸이']], ['가슴', ['벤치', '체스트', '인클라인', '펙덱', '푸쉬업', '푸시업']]];
-  function suggestBodyPart(name) {
+  function suggestBodyPart(name, allowed) {
     var n = String(name || '').replace(/\s+/g, '');
-    for (var i = 0; i < HINTS.length; i++) for (var j = 0; j < HINTS[i][1].length; j++) if (n.indexOf(HINTS[i][1][j]) >= 0) return HINTS[i][0];
+    for (var i = 0; i < HINTS.length; i++) {
+      if (allowed && allowed.indexOf(HINTS[i][0]) < 0) continue;
+      for (var j = 0; j < HINTS[i][1].length; j++) if (n.indexOf(HINTS[i][1][j]) >= 0) return HINTS[i][0];
+    }
     return null;
   }
+  function suggestBwMode(name) {
+    if (suggestBodyPart(name) !== BW_PART) return null;
+    var n = String(name || '').replace(/\s+/g, '');
+    return SEC_WORDS.some(function (w) { return n.indexOf(w) >= 0; }) ? 'sec' : 'reps';
+  }
+  // R12 section 8: an exercise is unique by (name, body part) among the LIVE ones; archived ones never block a name
+  Store.prototype._nameTaken = function (name, part, exceptId) {
+    return this.exercises().some(function (e) { return e.name === name && e.body_part === part && e.id !== exceptId; });
+  };
+  Store.prototype._partAllowed = function (part, current) {
+    if (part === current) return;
+    if (part === '가슴' && !this.supportsChest()) throw new Error('invalid body_part');
+    if (part === CARDIO_PART && !this.supportsCardio()) throw new Error('invalid body_part');
+    if (part === BW_PART && this.bodyParts().indexOf(BW_PART) < 0) throw new Error('invalid body_part');
+  };
   Store.prototype.addExercise = function (name, bodyPart, memo) {
-    name = cleanName(name); assertBodyPart(bodyPart);
-    if (bodyPart === '가슴' && !this.supportsChest()) throw new Error('invalid body_part');
-    if (bodyPart === CARDIO_PART && !this.supportsCardio()) throw new Error('invalid body_part');
+    name = cleanName(name); assertBodyPart(bodyPart); this._partAllowed(bodyPart, null);
     memo = cleanMemo(memo);
     if (memo && !this.supportsMemo()) throw new Error('memo unsupported');
-    if (this.exercises().some(function (e) { return e.name === name; })) throw new Error('duplicate exercise');
+    if (this._nameTaken(name, bodyPart)) throw new Error('duplicate exercise');
     var f = { name: name, body_part: bodyPart, archived: false }; if (this.supportsMemo()) f.memo = memo;
     return this._newRow('exercises', f);
   };
   Store.prototype.updateExercise = function (id, patch) {
     var e = this.exercise(id); if (!e) throw new Error('no exercise');
     var n = Object.assign({}, e);
-    if (patch.name !== undefined) {
-      n.name = cleanName(patch.name);
-      if (this.exercises().some(function (x) { return x.name === n.name && x.id !== id; })) throw new Error('duplicate exercise');
-    }
+    if (patch.name !== undefined) n.name = cleanName(patch.name);
     if (patch.body_part !== undefined) {
-      assertBodyPart(patch.body_part); n.body_part = patch.body_part;
-      if (patch.body_part === '가슴' && patch.body_part !== e.body_part && !this.supportsChest()) throw new Error('invalid body_part');
-      if (patch.body_part === CARDIO_PART && patch.body_part !== e.body_part && !this.supportsCardio()) throw new Error('invalid body_part');
-      // cardio sets (minutes) and strength sets (weight) cannot share an exercise: switching kind is refused once it has sets
-      if (isCardio(e) !== isCardio(n) && Array.from(this.t.sets.values()).some(function (x) { return x.exercise_id === id; })) throw new Error('kind change: exercise has sets'); // deleted ones too (undo could bring them back)
+      assertBodyPart(patch.body_part); this._partAllowed(patch.body_part, e.body_part); n.body_part = patch.body_part;
+      // sets of different kinds (cardio minutes / 맨몸 reps-only / strength weight) cannot share an exercise: a kind change
+      // with sets is refused here; the app offers splitExercise (archive + recreate) instead (R12 section 7)
+      if (this.needsSplit(id, { body_part: n.body_part })) throw new Error('kind change: exercise has sets');
     }
+    if (!e.archived && this._nameTaken(n.name, n.body_part, id)) throw new Error('duplicate exercise');
     if (patch.memo !== undefined) {
       var m = cleanMemo(patch.memo);
       if (m !== (e.memo || '')) { if (!this.supportsMemo()) throw new Error('memo unsupported'); n.memo = m; }
@@ -1257,12 +1400,13 @@
   // columns are not even put on the row (the server would refuse them); a reps/cardio value is refused locally instead.
   Store.prototype._setValue = function (exerciseId, fields) {
     var ex = this.exercise(exerciseId); if (!ex) throw new Error('no exercise');
-    var v = validateSetFields(fields, isCardio(ex) ? 'cardio' : null);
+    var k = kindOf(ex), v = validateSetFields(fields, k === 'str' ? null : k);
     if (!v.ok) throw new Error('invalid set: ' + v.error);
+    if (k === 'bw' && !this.supportsBodyweight()) throw new Error('bodyweight unsupported');
     if (!this.supportsReps()) {
       if (isCardio(ex)) throw new Error('cardio unsupported');
       if (v.value.reps !== null) throw new Error('reps unsupported');
-      delete v.value.reps; delete v.value.minutes; delete v.value.distance;
+      delete v.value.reps; delete v.value.minutes; delete v.value.distance; delete v.value.seconds;
     }
     return v.value;
   };
@@ -1281,14 +1425,14 @@
   Store.prototype.updateSet = function (id, fields, base) {
     var s = this.t.sets.get(id); if (!s) throw new Error('no set');
     function txt(v) { return v === null || v === undefined ? '' : v; }
-    var cur = { weight: txt(s.weight), reps: txt(s.reps), minutes: txt(s.minutes), distance: txt(s.distance), drops: s.drops && s.drops.length ? s.drops.join(',') : '', note: s.note, is_warmup: s.is_warmup };
+    var cur = { weight: txt(s.weight), reps: txt(s.reps), seconds: txt(s.seconds), minutes: txt(s.minutes), distance: txt(s.distance), drops: s.drops && s.drops.length ? s.drops.join(',') : '', note: s.note, is_warmup: s.is_warmup };
     if (base) {
       var eff = {};
       Object.keys(fields).forEach(function (k) { eff[k] = (k in base && String(base[k]) === String(fields[k])) ? cur[k] : fields[k]; });
       fields = eff;
     }
     fields = Object.assign({}, fields);
-    ['drops', 'reps', 'minutes', 'distance'].forEach(function (k) { if (!(k in fields)) fields[k] = cur[k]; });
+    ['drops', 'reps', 'minutes', 'distance', 'seconds'].forEach(function (k) { if (!(k in fields)) fields[k] = cur[k]; });
     var val = this._setValue(s.exercise_id, fields);
     var inverse = [{ table: 'sets', prev: clone(s) }];
     this._commit('sets', Object.assign({}, s, val));
@@ -1308,8 +1452,32 @@
     return this._softDelete('sets', this.setsForWorkout(workoutId).filter(function (s) { return s.exercise_id === exerciseId; }));
   };
   Store.prototype.deleteDay = function (wid) { var self = this; return this._softDelete('workouts', this._dayIds(wid).map(function (id) { return self.t.workouts.get(id); })); };
+  // R12: a kind change with sets (deleted ones count: undo could bring them back)
+  Store.prototype.needsSplit = function (id, patch) {
+    var e = this.exercise(id); if (!e || !patch || patch.body_part === undefined) return false;
+    if (kindOf(e) === kindOf({ body_part: patch.body_part })) return false;
+    for (var it = this.t.sets.values(), r = it.next(); !r.done; r = it.next()) if (r.value.exercise_id === id) return true;
+    return false;
+  };
+  // R12 section 7: change the kind of an exercise that has records WITHOUT touching any set row: the old exercise is archived
+  // (name, memo, sets, photo stay; it keeps its own body part so name+part never collides), a NEW exercise is created
+  // (insert-only) with the same name, memo and the new body part. Returns {old, created, inverse}; undo(inverse) restores
+  // the old row exactly and archives the new one (rows are never deleted).
+  Store.prototype.splitExercise = function (id, patch) {
+    var e = this.exercise(id); if (!e) throw new Error('no exercise');
+    assertBodyPart(patch.body_part); this._partAllowed(patch.body_part, e.body_part);
+    if (kindOf(e) === kindOf({ body_part: patch.body_part })) throw new Error('no kind change');
+    var name = patch.name !== undefined ? cleanName(patch.name) : e.name, memo = patch.memo !== undefined ? cleanMemo(patch.memo) : (e.memo || '');
+    if (this._nameTaken(name, patch.body_part, id)) throw new Error('duplicate exercise');
+    var prev = clone(e);
+    this._commit('exercises', Object.assign({}, e, { archived: true }));
+    var f = { name: name, body_part: patch.body_part, archived: false }; if (this.supportsMemo()) f.memo = memo;
+    var created = this._newRow('exercises', f);
+    return { old: this.exercise(id), created: created, inverse: [{ table: 'exercises', prev: prev }, { table: 'exercises', prev: Object.assign(clone(created), { archived: true }) }] };
+  };
   Store.prototype.archiveExercise = function (id, flag) {
     var e = this.exercise(id), inverse = [{ table: 'exercises', prev: clone(e) }];
+    if (flag === false && e.archived && this._nameTaken(e.name, e.body_part, id)) throw new Error('duplicate exercise'); // R12: restore into a collision
     this._commit('exercises', Object.assign({}, e, { archived: flag !== false }));
     return inverse;
   };
@@ -1359,9 +1527,10 @@
       var wOk = okNum(r.weight), cardio = has(r.minutes);
       if (has(r.reps) && !(Number.isInteger(r.reps) && r.reps >= 0 && r.reps <= REPS_MAX)) bad('set reps');
       if (has(r.minutes) && !(typeof r.minutes === 'number' && Number.isFinite(r.minutes) && r.minutes >= 0 && r.minutes <= MINUTES_MAX)) bad('set minutes');
+      if (has(r.seconds) && !(Number.isInteger(r.seconds) && r.seconds >= 1 && r.seconds <= SECONDS_MAX)) bad('set seconds');
       if (has(r.distance) && !(typeof r.distance === 'number' && Number.isFinite(r.distance) && r.distance >= 0 && r.distance <= DISTANCE_MAX)) bad('set distance');
       if (cardio && (has(r.weight) || has(r.reps) || r.is_warmup === true || (Array.isArray(r.drops) && r.drops.length))) bad('cardio set with weight/reps');
-      if (!wOk && !(o.version >= 2 && r.weight === null && r.is_warmup === true) && !(o.version >= 3 && r.weight === null && cardio)) bad('set weight');
+      if (!wOk && !(o.version >= 2 && r.weight === null && r.is_warmup === true) && !(o.version >= 3 && r.weight === null && (cardio || has(r.reps) || has(r.seconds)))) bad('set weight');
       if (r.drops !== undefined && r.drops !== null && !(Array.isArray(r.drops) && r.drops.every(okNum))) bad('set drops');
       if (r.is_warmup === true && Array.isArray(r.drops) && r.drops.length) bad('warm-up with drops');
       if (r.weight2 !== null && r.weight2 !== undefined && !okNum(r.weight2)) bad('set weight2');
@@ -1391,10 +1560,15 @@
     // an exercise of the same kind (existing rows the backup does not contain are part of the check). Refused = nothing written.
     var exAfter = new Map(this.t.exercises), setsAfter = new Map(this.t.sets);
     rows.exercises.forEach(function (r) { exAfter.set(r.id, r); }); rows.sets.forEach(function (r) { setsAfter.set(r.id, r); });
+    // R12: three kinds. cardio = minutes; 맨몸 = reps (weight optional), never a warm-up / minutes; strength = weight unless warm-up.
     setsAfter.forEach(function (r) {
-      var ex = exAfter.get(r.exercise_id);
-      if (ex && has(r.minutes) !== isCardio(ex)) throw new Error('import rejected: kind mismatch (' + (has(r.minutes) ? 'cardio' : 'strength') + ' set under ' + (isCardio(ex) ? 'cardio' : 'strength') + ' exercise "' + ex.name + '")');
+      var ex = exAfter.get(r.exercise_id); if (!ex) return;
+      var k = kindOf(ex), sk = has(r.minutes) ? 'cardio' : ((!has(r.weight) && !r.is_warmup) || has(r.seconds)) ? 'bw' : 'str';
+      var ok = k === 'cardio' ? sk === 'cardio' : k === 'bw' ? sk !== 'cardio' && !r.is_warmup && (has(r.reps) !== has(r.seconds)) : sk === 'str';
+      if (!ok) throw new Error('import rejected: kind mismatch (' + sk + ' set under ' + k + ' exercise "' + ex.name + '")');
     });
+    var seen = {}; // R12 section 8: live exercises are unique by name + body part
+    exAfter.forEach(function (e) { if (e.archived) return; var key = e.name + '\u0000' + e.body_part; if (seen[key]) throw new Error('import rejected: duplicate exercise "' + e.name + '" (' + e.body_part + ')'); seen[key] = 1; });
     TABLES.forEach(function (t) { rows[t].forEach(function (r) { self._commit(t, r, false); }); });
     await this.flush();
     return TABLES.reduce(function (acc, t) { acc[t] = o[t].length; return acc; }, {});
@@ -1455,15 +1629,15 @@
   }
   // Month grid for the calendar sheet, Sunday first (Korean default). ym 'YYYY-MM'; marked = dates with records.
   // -> {ym, prev, next, weeks: [[cell|null x7]...]}, cell {date, day, rec, today, past, future, label}
-  function calendarMonth(ym, today, marked) {
+  function calendarMonth(ym, today, marked, parts) {
     var b = rangeBounds(today, { month: ym }); // throws 'bad month'
     var y = Number(ym.slice(0, 4)), mo = Number(ym.slice(5, 7)), last = Number(b.until.slice(8));
     var d0 = new Date(2000, 0, 1); d0.setFullYear(y, mo - 1, 1);
     var rec = {}; (marked || []).forEach(function (d) { rec[d] = 1; });
     var cells = []; for (var i = 0; i < d0.getDay(); i++) cells.push(null);
     for (var d = 1; d <= last; d++) {
-      var ds = ym + '-' + (d < 10 ? '0' : '') + d, c = { date: ds, day: d, rec: !!rec[ds], today: ds === today, past: ds < today, future: ds > today };
-      c.label = mo + '월 ' + d + '일' + (c.today ? ' 오늘' : '') + (c.rec ? ' 기록 있음' : c.past ? ' 기록 없음' : '');
+      var ds = ym + '-' + (d < 10 ? '0' : '') + d, c = { date: ds, day: d, rec: !!rec[ds], today: ds === today, past: ds < today, future: ds > today, parts: (parts && parts[ds]) || [] };
+      c.label = mo + '월 ' + d + '일' + (c.today ? ' 오늘' : '') + (c.rec ? ' 기록 있음' : c.past ? ' 기록 없음' : '') + (c.parts.length ? ' ' + c.parts.join(' ') : '');
       cells.push(c);
     }
     while (cells.length % 7) cells.push(null);
@@ -1472,11 +1646,32 @@
     return { ym: ym, prev: shift(-1), next: shift(1), weeks: weeks };
   }
 
+  // R12 calendar cell labels (390px: a cell is ~50px wide): at most `max` part names, the rest as "+n" in the last slot
+  // pass 2 (CEO): up to 3 labels stacked, 2-char forms (유산소 -> 유산), "+n" only beyond 3
+  var SHORT_PART = { '유산소': '유산' };
+  function partLabels(parts, max) {
+    max = max || 3; parts = (parts || []).map(function (p) { return SHORT_PART[p] || p; });
+    return parts.length <= max ? parts : parts.slice(0, max).concat(['+' + (parts.length - max)]);
+  }
+  // R12 picker: {recent: the 2 most recently used (recentIds order), rest: every other one in 가나다 order (same name: body-part
+  // order)}; q filters both by name or body part. `exercises` = the live list (archived already excluded by the caller).
+  function pickerGroups(exercises, recentIds, q) {
+    q = String(q || '').trim().toLowerCase();
+    var byId = {}; exercises.forEach(function (e) { byId[e.id] = e; });
+    var recent = (recentIds || []).filter(function (id) { return byId[id]; }).slice(0, 2).map(function (id) { return byId[id]; });
+    var rids = recent.map(function (e) { return e.id; });
+    function hit(e) { return !q || e.name.toLowerCase().indexOf(q) >= 0 || e.body_part.indexOf(q) >= 0; }
+    var rest = exercises.filter(function (e) { return rids.indexOf(e.id) < 0 && hit(e); })
+      .sort(function (a, b) { return a.name.localeCompare(b.name, 'ko') || BODY_PARTS.indexOf(a.body_part) - BODY_PARTS.indexOf(b.body_part); });
+    return { recent: recent.filter(hit), rest: rest };
+  }
+
   return {
     BODY_PARTS: BODY_PARTS, SEED_EXERCISES: SEED_EXERCISES, parseSetLine: parseSetLine, parseLines: parseLines,
     suggestBodyPart: suggestBodyPart, PhotoStore: PhotoStore, MemCache: MemCache, fitSize: fitSize, validThumb: validThumb, PHOTO_MAX_CHARS: PHOTO_MAX_CHARS, formatSet: formatSet, formatSets: formatSets, nudge: nudge, validateSetFields: validateSetFields, dayStats: dayStats, groupByBodyPart: groupByBodyPart,
     delta: delta, MemoryStorage: MemoryStorage, LocalAdapter: LocalAdapter, SupabaseAdapter: SupabaseAdapter,
     SbClient: SbClient, SupabaseAuth: SupabaseAuth, emailFor: emailFor, Store: Store, LocalAuth: LocalAuth, sha256Hex: sha256Hex, workoutId: workoutId, rangeBounds: rangeBounds, validDate: validDate, validateImport: validateImport, todayStr: todayStr, addDays: addDays,
-    volumeOf: volumeOf, fmtVolume: fmtVolume, lastLineText: lastLineText, weekStart: weekStart, calendarMonth: calendarMonth, isCardio: isCardio, CARDIO_PART: CARDIO_PART, CARDIO_GOAL: CARDIO_GOAL
+    volumeOf: volumeOf, fmtVolume: fmtVolume, lastLineText: lastLineText, weekStart: weekStart, calendarMonth: calendarMonth, isCardio: isCardio, CARDIO_PART: CARDIO_PART, CARDIO_GOAL: CARDIO_GOAL,
+    BW_PART: BW_PART, isBodyweight: isBodyweight, kindOf: kindOf, displaySet: displaySet, totalReps: totalReps, totalSeconds: totalSeconds, fmtDuration: fmtDuration, suggestBwMode: suggestBwMode, partLabels: partLabels, pickerGroups: pickerGroups
   };
 });
