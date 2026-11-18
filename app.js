@@ -78,7 +78,7 @@
 
   // ---------------- read-only (another window holds the writer lease) ----------------
   var WRITE_ACTS = ['addset', 'same', 'copylast', 'paste', 'editset', 'saveset', 'delset', 'delblock', 'delday', 'confirmyes', 'addex', 'pick', 'newex', 'wu', 'ewu',
-    'addwu', 'copyday', 'docopy', 'cleardrops', 'photodel', 'madd', 'mrename', 'marchive', 'eadd', 'esave', 'earchive', 'doimport', 'undo', 'retryrejected', 'retry', 'splityes'];
+    'addwu', 'copyday', 'docopy', 'cleardrops', 'photodel', 'madd', 'mrename', 'marchive', 'eadd', 'esave', 'earchive', 'doimport', 'undo', 'retryrejected', 'retry', 'splityes', 'edelete', 'erestore'];
   function roNow() { return remote && !!auth.current() && !store.writer; }
   function applyRO() {
     var ro = roNow(), b = $('robanner'); if (b) b.hidden = !ro;
@@ -360,16 +360,16 @@
   function memberIdsFor(mem) { return mem === 'all' ? null : [mem]; }
 
   function exercisesWithData() { // strength exercises only (cardio has its own view)
-    return store.exercises(true).filter(function (e) { return e.body_part && !GL.isCardio(e) && (!e.archived || store.seriesFor(e.id, { includeWarmup: true }).length); });
+    return store.growthExercises().filter(function (e) { return e.body_part && !GL.isCardio(e) && ((!e.archived && !e.deleted) || store.seriesFor(e.id, { includeWarmup: true }).length); });
   }
   function shortDate(d) { return d.slice(5).replace('-', '/'); }
 
   // 유산소 growth: minutes (or km) per session per member, weekly count vs the goal, last 10 sessions
   function renderCardioGrowth(g, memOpts) {
-    var exs = store.exercises(true).filter(function (e) { return GL.isCardio(e) && (!e.archived || store.cardioSeries(e.id).length); }), html = '';
+    var exs = store.growthExercises().filter(function (e) { return GL.isCardio(e) && ((!e.archived && !e.deleted) || store.cardioSeries(e.id).length); }), html = '';
     if (!g.cExId || !exs.some(function (e) { return e.id === g.cExId; })) g.cExId = exs.length ? exs[0].id : null;
     var ex = g.cExId ? store.exercise(g.cExId) : null;
-    html += '<select id="gcex" aria-label="유산소 운동 선택">' + exs.map(function (e) { return '<option value="' + esc(e.id) + '"' + (e.id === g.cExId ? ' selected' : '') + '>' + esc(e.name) + (e.archived ? ' (보관됨)' : '') + '</option>'; }).join('') + '</select>';
+    html += '<select id="gcex" aria-label="유산소 운동 선택">' + exs.map(function (e) { return '<option value="' + esc(e.id) + '"' + (e.id === g.cExId ? ' selected' : '') + '>' + esc(e.name) + (e.deleted ? ' (삭제됨)' : e.archived ? ' (보관됨)' : '') + '</option>'; }).join('') + '</select>';
     html += '<div style="height:8px"></div><select id="gmem" aria-label="멤버">' + memOpts + '</select>' + periodHtml(g);
     html += '<div class="opts"><label><input type="checkbox" id="gdist"' + (g.dist ? ' checked' : '') + '>거리(km) 그래프</label></div>';
     var mids = g.mem === 'all' ? store.members().map(function (m) { return m.id; }) : [g.mem];
@@ -415,7 +415,7 @@
       var ex = g.exId ? store.exercise(g.exId) : null;
       html += '<select id="gex" aria-label="운동 선택">' + GL.BODY_PARTS.map(function (bp) {
         var l = exs.filter(function (e) { return e.body_part === bp; });
-        return l.length ? '<optgroup label="' + esc(bp) + '">' + l.map(function (e) { return '<option value="' + esc(e.id) + '"' + (e.id === g.exId ? ' selected' : '') + '>' + esc(e.name) + (e.archived ? ' (보관됨)' : '') + '</option>'; }).join('') + '</optgroup>' : '';
+        return l.length ? '<optgroup label="' + esc(bp) + '">' + l.map(function (e) { return '<option value="' + esc(e.id) + '"' + (e.id === g.exId ? ' selected' : '') + '>' + esc(e.name) + (e.deleted ? ' (삭제됨)' : e.archived ? ' (보관됨)' : '') + '</option>'; }).join('') + '</optgroup>' : '';
       }).join('') + '</select>';
       html += '<div style="height:8px"></div><select id="gmem" aria-label="멤버">' + memOpts + '</select>' + periodHtml(g);
       html += '<div class="opts">' + wuOpt + (g.vol ? '' : '<label><input type="checkbox" id="gmax"' + (g.max ? ' checked' : '') + '>최대값 선도 표시</label>') +
@@ -491,6 +491,29 @@
     if (nx && !S.sheet.nxnTyped) nx.value = pk.empty && q.trim() ? q : '';
     applyRO();
   }
+  // R13 운동 관리 card: name + part (+ photo, memo), buttons at the bottom; archived = muted + 보관됨 label, inputs read-only
+  function exCard(e) {
+    var A = e.archived, X = esc(e.id);
+    return '<div class="mgcard' + (A ? ' archived' : '') + '" data-exid="' + X + '" data-search="' + esc((e.name + ' ' + e.body_part).toLowerCase()) + '">' +
+      (A ? '<div class="mname">' + exName(e) + badge(e) + ' <span class="tag">보관됨</span></div>' : '') +
+      '<div class="row"><input class="grow" data-exname="' + X + '" value="' + esc(e.name) + '"' + (A ? ' disabled hidden' : '') + '>' +
+      '<select data-exbp="' + X + '" style="width:84px"' + (A ? ' disabled hidden' : '') + '>' + exerciseOptions(e.body_part) + '</select></div>' +
+      (photos && photos.available() && !A ? '<div class="row photorow" style="margin-top:6px">' + (photos.url(e.id) ? '<img class="exthumb" src="' + photos.url(e.id) + '" alt="">' : '<span class="muted">사진 없음</span>') +
+        '<label class="btn photobtn">' + (photos.url(e.id) ? '사진 바꾸기' : '사진 추가') + '<input type="file" accept="image/*" data-exphoto="' + X + '" hidden></label>' +
+        (photos.url(e.id) ? '<button data-act="photodel" data-id="' + X + '">사진 삭제</button>' : '') + '</div>' : '') +
+      (store.supportsMemo() && !A ? '<input style="width:100%;margin-top:6px" data-exmemo="' + X + '" maxlength="200" placeholder="메모 (그립 / 자극 부위 / 세팅)" value="' + esc(e.memo || '') + '">' : '') +
+      '<div class="mgbtns">' + (A ? '<button data-act="earchive" data-id="' + X + '" data-f="0">복원</button>' : '<button class="primary" data-act="esave" data-id="' + X + '">저장</button><button data-act="earchive" data-id="' + X + '" data-f="1">보관</button>') +
+      (store.supportsDelete() ? '<button class="danger" data-act="edelete" data-id="' + X + '">삭제</button>' : '') + '</div></div>';
+  }
+  // R13 §2: filter by hiding cards (no rebuild: unsaved edits in other cards and the focused search box stay untouched)
+  function filterManage(q) {
+    if (!S.sheet || S.sheet.type !== 'exercises') return;
+    S.sheet.q = q; var t = String(q || '').trim().toLowerCase(), shown = 0, arcShown = 0;
+    Array.prototype.forEach.call(document.querySelectorAll('#exlist .mgcard'), function (c) {
+      var hit = !t || c.getAttribute('data-search').indexOf(t) >= 0; c.hidden = !hit; if (hit) { shown++; if (c.classList.contains('archived')) arcShown++; }
+    });
+    var ah = $('archead'); if (ah) ah.hidden = !arcShown; var no = $('exnone'); if (no) no.hidden = !!shown;
+  }
   function renderSheet() {
     var s = S.sheet;
     if (!s) { $sheet.hidden = true; $sheet.innerHTML = ''; return; }
@@ -551,36 +574,36 @@
     } else if (s.type === 'split') { // R12 section 7: kind change of an exercise with records = archive + recreate
       var sx = store.exercise(s.id);
       h = '<h2>' + esc(sx.name) + ': ' + esc(sx.body_part) + ' → ' + esc(s.patch.body_part) + '</h2><p id="splitq">기존 기록은 그대로 두고 새 종류로 바꿀까요?</p>' +
-        '<p class="muted">기록이 있는 운동은 종류(근력 · 맨몸 · 유산소)를 바로 바꿀 수 없어요. 지금 운동은 기록과 함께 보관되고(' + esc(sx.body_part) + ' 배지로 남아요), 같은 이름의 ' + esc(s.patch.body_part) + ' 운동을 새로 만들어요. 바로 되돌릴 수 있어요.</p>' +
+        '<p class="muted">기록이 있는 운동은 유산소 ↔ 근력/맨몸으로 바로 바꿀 수 없어요 (근력 ↔ 맨몸은 그냥 바뀌어요). 지금 운동은 기록과 함께 보관되고(' + esc(sx.body_part) + ' 배지로 남아요), 같은 이름의 ' + esc(s.patch.body_part) + ' 운동을 새로 만들어요. 바로 되돌릴 수 있어요.</p>' +
         '<div class="err" id="serr"></div><div class="row"><button class="primary grow" data-act="splityes">새 종류로 바꾸기</button><button class="grow" data-act="gexercises">취소</button></div>';
     } else if (s.type === 'zoom') {
       var zex = store.exercise(s.ex), zu = photos && photos.url(s.ex);
       h = '<h2>' + (zex ? exName(zex) : '') + '</h2>' + (zu ? '<img class="zoomimg" src="' + zu + '" alt="">' : '<p class="muted">사진이 없어요.</p>') + (zex ? memoHtml(zex) : '') + '<button style="width:100%;margin-top:8px" data-act="close">닫기</button>';
     } else if (s.type === 'confirm') {
-      h = '<h2>' + esc(s.title) + '</h2><p class="muted">' + esc(s.body) + '</p><div class="row"><button class="danger grow" data-act="confirmyes">삭제</button><button class="grow" data-act="close">취소</button></div>';
+      h = '<h2>' + esc(s.title) + '</h2><p class="muted">' + esc(s.body) + '</p><div class="row"><button class="danger grow" data-act="confirmyes">' + esc(s.yesLabel || '삭제') + '</button><button class="grow" data-act="close">취소</button></div>';
     } else if (s.type === 'gear') {
       h = '<h2>설정</h2><div class="list"><button class="item" data-act="gmembers">멤버 관리 ›</button><button class="item" data-act="gexercises">운동 관리 ›</button>' +
         '<button class="item" data-act="export">백업 내보내기 (JSON)</button>' + (remote ? '' : '<button class="item" data-act="import">백업 가져오기 ›</button>') + '<button class="item danger" data-act="logout">로그아웃</button></div>' +
         '<button style="width:100%;margin-top:8px" data-act="close">닫기</button>';
-    } else if (s.type === 'members') {
+    } else if (s.type === 'members') { // R13 §5: one card per member, buttons inside at the bottom
       h = '<h2>멤버 관리</h2><div class="list">' + store.members(true).map(function (m) {
         // server mode: the account is tied to the name (login hash), so the name is read-only there
-        var nameCell = remote ? '<span class="grow">' + esc(m.name) + '</span>' : '<input class="grow" data-rename="' + esc(m.id) + '" value="' + esc(m.name) + '"' + (m.archived ? ' disabled' : '') + '>';
-        return '<div class="row" style="margin:6px 0">' + nameCell +
-          (m.archived ? '<button data-act="marchive" data-id="' + esc(m.id) + '" data-f="0">복원</button>' : (remote ? '' : '<button data-act="mrename" data-id="' + esc(m.id) + '">저장</button>') + '<button class="danger" data-act="marchive" data-id="' + esc(m.id) + '" data-f="1">보관</button>') + '</div>';
+        var nameCell = remote ? '<div class="mname">' + esc(m.name) + (m.archived ? ' <span class="tag">보관됨</span>' : '') + '</div>' : '<input class="grow" data-rename="' + esc(m.id) + '" value="' + esc(m.name) + '"' + (m.archived ? ' disabled' : '') + '>';
+        return '<div class="mgcard' + (m.archived ? ' archived' : '') + '" data-mid="' + esc(m.id) + '">' + nameCell + '<div class="mgbtns">' +
+          (m.archived ? '<button data-act="marchive" data-id="' + esc(m.id) + '" data-f="0">복원</button>' : (remote ? '' : '<button data-act="mrename" data-id="' + esc(m.id) + '">저장</button>') + '<button class="danger" data-act="marchive" data-id="' + esc(m.id) + '" data-f="1">보관</button>') + '</div></div>';
       }).join('') + '</div>' + (remote ? '' : '<h2>멤버 추가</h2><div class="row"><input id="nmn" placeholder="이름"><button class="primary" data-act="madd">추가</button></div>') + '<div class="err" id="serr">' + esc(s.err || '') + '</div>' +
         '<div class="row" style="margin-top:8px"><button class="grow" data-act="gear">뒤로</button><button class="grow" data-act="close">닫기</button></div>';
-    } else if (s.type === 'exercises') {
-      h = '<h2>운동 관리</h2><div class="list">' + store.exercises(true).map(function (e) {
-        return '<div class="row" style="margin:6px 0;flex-wrap:wrap"><input class="grow" data-exname="' + esc(e.id) + '" value="' + esc(e.name) + '"' + (e.archived ? ' disabled' : '') + '>' +
-          '<select data-exbp="' + esc(e.id) + '" style="width:84px"' + (e.archived ? ' disabled' : '') + '>' + exerciseOptions(e.body_part) + '</select>' +
-          (photos && photos.available() && !e.archived ? '<div class="row photorow" style="flex-basis:100%;margin-top:6px">' + (photos.url(e.id) ? '<img class="exthumb" src="' + photos.url(e.id) + '" alt="">' : '<span class="muted">사진 없음</span>') +
-            '<label class="btn photobtn">' + (photos.url(e.id) ? '사진 바꾸기' : '사진 추가') + '<input type="file" accept="image/*" data-exphoto="' + esc(e.id) + '" hidden></label>' +
-            (photos.url(e.id) ? '<button data-act="photodel" data-id="' + esc(e.id) + '">사진 삭제</button>' : '') + '</div>' : '') +
-          (store.supportsMemo() ? '<input style="flex-basis:100%;margin-top:6px" data-exmemo="' + esc(e.id) + '" maxlength="200" placeholder="메모 (그립 / 자극 부위 / 세팅)" value="' + esc(e.memo || '') + '"' + (e.archived ? ' disabled' : '') + '>' : '') +
-          (e.archived ? '<button data-act="earchive" data-id="' + esc(e.id) + '" data-f="0">복원</button>' : '<button data-act="esave" data-id="' + esc(e.id) + '">저장</button><button class="danger" data-act="earchive" data-id="' + esc(e.id) + '" data-f="1">보관</button>') + '</div>';
-      }).join('') + '</div><h2>운동 추가</h2><input id="nxn" placeholder="운동 이름" autocomplete="off">' + bpChips(s.bp) + memoInput('nxm', '') +
-        '<div class="err" id="serr">' + esc(s.err || '') + '</div><button class="primary" style="width:100%" data-act="eadd">추가</button><div class="row" style="margin-top:8px"><button class="grow" data-act="gear">뒤로</button><button class="grow" data-act="close">닫기</button></div>';
+    } else if (s.type === 'exercises') { // R13: search (IME-safe), one card per exercise, active first, 보관한 운동 below, 삭제한 운동 at the bottom
+      var all = store.manageExercises(), act = all.filter(function (e) { return !e.archived; }), arc = all.filter(function (e) { return e.archived; }), del = store.supportsDelete() ? store.deletedExercises() : [];
+      h = '<h2>운동 관리</h2><input id="eq" placeholder="운동 검색 (이름 · 부위)" autocomplete="off" value="' + esc(s.q || '') + '"><div class="err" id="serr">' + esc(s.err || '') + '</div>' +
+        '<div class="list" id="exlist">' + act.map(exCard).join('') + '<div class="muted" id="exnone" hidden>검색 결과가 없어요.</div>' +
+        (arc.length ? '<h3 class="mghead" id="archead">보관한 운동 <span class="muted">(목록에서 숨김 · 복원 가능)</span></h3>' + arc.map(exCard).join('') : '') + '</div>' +
+        '<h2>운동 추가</h2><input id="nxn" placeholder="운동 이름" autocomplete="off">' + bpChips(s.bp) + memoInput('nxm', '') +
+        '<button class="primary" style="width:100%" data-act="eadd">추가</button>' +
+        (del.length ? '<h3 class="mghead" id="delhead">삭제한 운동 <span class="muted">(기록은 그대로 있어요)</span></h3><div id="dellist">' + del.map(function (e) {
+          return '<div class="mgcard deleted" data-delid="' + esc(e.id) + '"><div class="mname">' + exName(e) + badge(e) + '</div><div class="mgbtns"><button data-act="erestore" data-id="' + esc(e.id) + '">되살리기</button></div></div>';
+        }).join('') + '</div>' : '') +
+        '<div class="row" style="margin-top:8px"><button class="grow" data-act="gear">뒤로</button><button class="grow" data-act="close">닫기</button></div>';
     } else if (s.type === 'import') {
       h = '<h2>백업 가져오기</h2><p class="muted">같은 항목은 덮어쓰고 나머지는 합칩니다. 형식이 틀리면 아무것도 바뀌지 않아요.</p>' +
         '<input type="file" id="ifile" accept="application/json,.json"><textarea id="itext" placeholder="또는 JSON 붙여넣기"></textarea><div class="err" id="serr">' + esc(s.err || '') + '</div>' +
@@ -588,6 +611,7 @@
     }
     $sheet.innerHTML = '<div class="panel" role="dialog" aria-modal="true">' + h + '</div>';
     $sheet.hidden = false;
+    if (s.type === 'exercises' && s.q) filterManage(s.q);
   }
 
   // ---------------- actions ----------------
@@ -601,13 +625,16 @@
     var m = String(e && e.message || e);
     if (/duplicate exercise/.test(m)) return '같은 부위에 같은 이름의 운동이 이미 있어요. (다른 부위라면 같은 이름도 괜찮아요)';
     if (/duplicate/.test(m)) return '같은 이름이 이미 있어요.';
+    if (/delete unsupported/.test(m)) return '삭제는 서버 업데이트 후 사용할 수 있어요. (보관은 지금도 돼요)';
+    if (/undo would bring back|undo after the exercise changed family/.test(m)) return '운동 종류가 바뀌어서 이 기록은 되돌릴 수 없어요.'; // R13 r2: exercise undo too
     if (/bodyweight unsupported/.test(m)) return '맨몸 운동은 서버 업데이트 후 사용할 수 있어요.';
     if (/memo too long/.test(m)) return '메모는 200자까지 쓸 수 있어요.';
     if (/invalid body_part/.test(m)) return '이 부위는 아직 쓸 수 없어요.';
     if (/same day/.test(m)) return '같은 날 기록은 복사할 수 없어요.';
     if (/nothing to copy/.test(m)) return '그 날은 복사할 기록이 없어요.';
     if (/empty name/.test(m)) return '이름을 입력해 주세요.';
-    if (/kind change/.test(m)) return '기록이 있는 운동은 유산소/근력 종류를 바꿀 수 없어요.';
+    if (/undo would bring back/.test(m)) return '운동 종류가 바뀌어서 이 기록은 되돌릴 수 없어요.';
+    if (/kind change/.test(m)) return '기록이 있는 운동은 유산소 ↔ 근력/맨몸으로 바꿀 수 없어요.';
     if (/reps unsupported|cardio unsupported/.test(m)) return '횟수·유산소 기록은 서버 업데이트 후 사용할 수 있어요.';
     if (/invalid set/.test(m)) return setErrText(m.replace(/^.*invalid set: /, ''));
     if (/import rejected/.test(m)) return '가져오기 실패: ' + m.replace('import rejected: ', '') + ' (아무것도 바뀌지 않았어요)';
@@ -634,7 +661,7 @@
     if ($('r-' + exId)) f.reps = $('r-' + exId).value;
     return f;
   }
-  function undoToast(msg, token) { toast(msg, function () { store.undo(token); }); }
+  function undoToast(msg, token) { toast(msg, function () { try { store.undo(token); } catch (e) { toast(humanError(e)); } }); } // R13: a refused undo explains itself
 
   var actions = {
     retry: function () { kick(); },
@@ -758,6 +785,7 @@
     delday: function () { openSheet({ type: 'confirm', title: S.date + ' 기록 전체를 삭제할까요?', body: '이 날의 모든 운동과 세트가 삭제돼요. 삭제 직후 되돌릴 수 있어요.', yes: { act: 'day' } }); },
     confirmyes: function () {
       var y = S.sheet.yes, w = store.workoutFor(S.view, S.date), tok;
+      if (y.act === 'exdel') { tok = guard(function () { return store.deleteExercise(y.id); }); if (!tok) return; S.draft = S.draft.filter(function (id) { return id !== y.id; }); openSheet({ type: 'exercises' }); undoToast('목록에서 삭제했어요 (기록은 그대로 남아요)', tok); changed(); return; }
       if (!w) { closeSheet(); return; }
       if (y.act === 'block') { tok = store.deleteExerciseBlock(w.id, y.ex); undoToast('운동 기록을 삭제했어요', tok); }
       else { tok = store.deleteDay(w.id); undoToast('하루 기록을 삭제했어요', tok); }
@@ -794,6 +822,11 @@
       if (store.needsSplit(d.id, patch)) { openSheet({ type: 'split', id: d.id, patch: patch }); return; } // R12 section 7: ask, never refuse
       var ok = guard(function () { store.updateExercise(d.id, patch); return true; });
       if (ok) { openSheet({ type: 'exercises' }); changed(); }
+    },
+    edelete: function (d) { var e = store.exercise(d.id); openSheet({ type: 'confirm', title: e.name + ' (' + e.body_part + ')', body: '목록에서 삭제할까요? 기록은 그대로 남아요.', yes: { act: 'exdel', id: d.id }, yesLabel: '목록에서 삭제' }); },
+    erestore: function (d) {
+      var tok = guard(function () { return store.restoreDeleted(d.id); }); if (!tok) return;
+      openSheet({ type: 'exercises' }); undoToast('운동을 되살렸어요', tok); changed();
     },
     splityes: function () {
       var s = S.sheet, r = guard(function () { return store.splitExercise(s.id, s.patch); });
@@ -864,14 +897,18 @@
     if (ev.target.id === 'nxn' && S.sheet && S.sheet.type === 'picker') S.sheet.nxnTyped = !!ev.target.value; // the user's own name is never overwritten by the search
     // R12 IME: skip while composing (iOS Korean), the list is updated on compositionend; never rebuild the focused input
     if (ev.target.id === 'pq' && S.sheet && !ev.isComposing && !S.composing) updatePicker(ev.target.value);
+    if (ev.target.id === 'eq' && S.sheet && !ev.isComposing && !S.composing) filterManage(ev.target.value); // R13 §2: same IME rule
   });
   document.addEventListener('focusin', function (ev) { // P2: typing replaces the kept value. Next tick: a selection made inside focus is reset by browsers (iOS Safari too)
     var t = ev.target; if (!(t.matches && t.matches('.entry input') && t.value)) return;
     setTimeout(function () { if (document.activeElement === t) try { t.setSelectionRange(0, t.value.length); } catch (e) { /* not a text field */ } }, 0);
   });
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { acquireWake(); restTick(); } });
-  document.addEventListener('compositionstart', function (ev) { if (ev.target.id === 'pq') S.composing = true; });
-  document.addEventListener('compositionend', function (ev) { if (ev.target.id === 'pq') { S.composing = false; updatePicker(ev.target.value); } });
+  document.addEventListener('compositionstart', function (ev) { if (ev.target.id === 'pq' || ev.target.id === 'eq') S.composing = true; });
+  document.addEventListener('compositionend', function (ev) {
+    if (ev.target.id === 'pq') { S.composing = false; updatePicker(ev.target.value); }
+    if (ev.target.id === 'eq') { S.composing = false; filterManage(ev.target.value); }
+  });
   document.addEventListener('change', function (ev) {
     var id = ev.target.id;
     if (ev.target.hasAttribute && ev.target.hasAttribute('data-exphoto')) {

@@ -156,3 +156,13 @@ select.chip { appearance: none; -webkit-appearance: none; padding-right: 16px; }
 .cal-legend .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; border: 2px solid transparent; }
 .cal-legend .dot.rec { background: var(--rec); } .cal-legend .dot.past { background: var(--past); } .cal-legend .dot.today { border-color: var(--text); }
 td.goalok { color: var(--ok); font-weight: 700; }
+
+/* R13 운동 관리 / 멤버 관리: one card per item, clear gap, buttons inside at the bottom; archived = muted */
+.mgcard { border: 1px solid var(--line, rgba(127,127,127,.3)); border-radius: 12px; padding: 10px; margin: 0 0 12px; background: var(--card, transparent); }
+.mgcard.archived, .mgcard.deleted { opacity: .65; border-style: dashed; }
+.mgcard .mname { font-weight: 600; margin-bottom: 6px; overflow-wrap: anywhere; }
+.mgbtns { display: flex; gap: 8px; margin-top: 8px; }
+.mgbtns button { flex: 1 1 0; }
+.mghead { margin: 16px 0 8px; font-size: 14px; }
+#eq { width: 100%; margin-bottom: 8px; }
+.panel > #serr:empty { display: none; } /* R13: no empty gap under the 운동 관리 search box */

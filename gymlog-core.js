@@ -298,7 +298,7 @@
   var TOK_KEY = 'gl:auth'; // {access_token, refresh_token, expires_at(sec)}. The PIN is never stored.
   var COLS = { // exact server columns (schema is fixed); anything else (e.g. local updated_by) is dropped
     members: ['id', 'name', 'archived'],
-    exercises: ['id', 'name', 'body_part', 'archived', 'memo'], // memo exists only after migration-002: it is sent only when set/changed, and only if the server rows carry it
+    exercises: ['id', 'name', 'body_part', 'archived', 'memo', 'deleted'], // R13: deleted exists only after migration-006 (sent only by deleteExercise / restoreDeleted, which need it) // memo exists only after migration-002: it is sent only when set/changed, and only if the server rows carry it
     workouts: ['id', 'member_id', 'date', 'note', 'deleted'],
     sets: ['id', 'workout_id', 'exercise_id', 'position', 'is_warmup', 'weight', 'drops', 'note', 'deleted', 'updated_at', 'reps', 'minutes', 'distance', 'seconds'] // reps/minutes/distance exist only after migration-004, seconds after 005: rows carry them only when the server does (Store.supportsReps)
   };
@@ -427,7 +427,9 @@
   // `changed` = columns the user changed on an EXISTING row: only those are PATCHed (never a whole-row overwrite, never
   // `deleted:false` unless that is the change). null = brand-new row -> full upsert. If the PATCH matches no row on the
   // server (it only ever existed offline) fall through to the upsert so FK order and history stay intact.
-  SupabaseAdapter.prototype.put = async function (table, row, changed, extra) {
+  // R13: unless the row is `known` (seen in a server load or created+acked): then it was removed on the server (hard delete
+  // by the owner/master) -> answer 'gone' and NEVER re-create it.
+  SupabaseAdapter.prototype.put = async function (table, row, changed, extra, known) {
     if (!COLS[table]) throw new Error('unknown table ' + table);
     var J = { 'Content-Type': 'application/json' };
     function fail(r) { return codeErr('HTTP', 'write ' + table + ' failed: HTTP ' + r.status, { status: r.status, permanent: isPermanent(r.status) }); }
@@ -440,6 +442,8 @@
       if (!pr.ok) throw fail(pr);
       var hit; try { hit = await pr.json(); } catch (e) { hit = null; }
       if (Array.isArray(hit) && hit.length) return;
+      if (known === 'ambiguous') return 'missing'; // R13 r2
+      if (known) return 'gone';
     }
     var r = await this.c.rest('POST', '/rest/v1/' + table + '?on_conflict=id',
       { headers: Object.assign({ Prefer: 'resolution=ignore-duplicates,return=minimal' }, J), body: JSON.stringify(newRowBody(table, row)) }); // creation is INSERT-ONLY: it can never overwrite an existing row
@@ -465,7 +469,8 @@
       var code = j && j.code ? String(j.code) : '', msg = j && j.message ? String(j.message) : '';
       if (code === '42703' || code === 'PGRST204' || code === 'PGRST100' || /column .* does not exist/i.test(msg)) out.reps = false;
     }
-    out.bw = await this.probeSchema5();
+    var v = await this.probeSchema5(); // R13: the schema version number (5 = 맨몸, 6 = exercises.deleted)
+    out.bw = v === null ? null : v >= 5; out.del = v === null ? null : v >= 6;
     return out.reps === null && out.bw === null ? null : out;
   };
   // R12 migration-005 (body part 맨몸 + reps-only working sets) changes only CHECK constraints, which REST cannot see, so the
@@ -475,10 +480,10 @@
     var r; try { r = await this.c.rest('GET', '/rest/v1/rpc/gymlog_schema_version'); }
     catch (e) { if (e && e.code === 'AUTH') throw e; return null; }
     var j = null; try { j = await r.json(); } catch (e) { /* no body */ }
-    if (r.ok) return typeof j === 'number' && j >= 5;
+    if (r.ok) return typeof j === 'number' ? j : null; // R13: returns the version (0 = function missing, null = unknown)
     if (r.status === 404) {
       var code = j && j.code ? String(j.code) : '', msg = j && j.message ? String(j.message) : '';
-      if (code === 'PGRST202' || /could not find the function/i.test(msg)) return false;
+      if (code === 'PGRST202' || /could not find the function/i.test(msg)) return 0;
     }
     return null;
   };
@@ -680,6 +685,7 @@
     this.gen = 0; // ownership/load generation: bumped when the lease is lost or a load adopts the queue; async completions from an older one do nothing
     this._ver = 0; // bumps on every local change / completed write (lets refresh() detect a race)
     this.caps = readCaps(this.kv); // last CONFIRMED server capability (migration-004), cached for offline starts
+    this.known = new Set(); // R13: 'table:id' of rows the server is known to have (re-creating a vanished one is never allowed)
     this.tombs = new Map(); // remote soft-deleted sets {id, workout_id, exercise_id, position}: block order key only
   }
   Store.prototype._loadTombs = async function () {
@@ -692,6 +698,7 @@
       var c = JSON.parse(kv.getItem('gl:caps')), o = {};
       if (c && typeof c.reps === 'boolean') o.reps = c.reps;
       if (c && typeof c.bw === 'boolean') o.bw = c.bw; // R12: migration-005 (맨몸)
+      if (c && typeof c.del === 'boolean') o.del = c.del; // R13: migration-006 (exercises.deleted)
       return o;
     } catch (e) { return {}; }
   }
@@ -701,7 +708,7 @@
     var r; try { r = await this.a.probeCaps(); } catch (e) { return; } // network / auth: keep the last confirmed value
     if (!r) return; // 5xx / unexpected: unknown, keep
     var c = Object.assign({}, this.caps), changed = false;
-    ['reps', 'bw'].forEach(function (k) { if (typeof r[k] === 'boolean') { c[k] = r[k]; changed = true; } });
+    ['reps', 'bw', 'del'].forEach(function (k) { if (typeof r[k] === 'boolean') { c[k] = r[k]; changed = true; } });
     if (!changed) return;
     this.caps = c;
     try { this.kv.setItem('gl:caps', JSON.stringify(this.caps)); } catch (e) { /* quota: memory only */ }
@@ -722,7 +729,7 @@
   Store.prototype._persistPending = function () {
     if (!this._owns()) return; // never clobber the outbox of the tab that now owns it
     try {
-      this.kv.setItem('gl:pending', JSON.stringify(this.pending.map(function (p) { return { table: p.table, row: p.row, changed: p.changed, extra: p.extra, stamp: p.stamp }; })));
+      this.kv.setItem('gl:pending', JSON.stringify(this.pending.map(function (p) { return { table: p.table, row: p.row, changed: p.changed, extra: p.extra, stamp: p.stamp, known: p.known === 'ambiguous' ? 'ambiguous' : !!p.known }; })));
       this._mem('pending', false);
     } catch (e) {
       this.lastError = 'local-persist: ' + e.message;
@@ -800,6 +807,23 @@
   };
 
   // one load at a time (login, boot and the lease takeover may all ask)
+  // R13 r2: outbox / rejected entries written before R13 have no `known`. Known if the row is in the server rows / snapshot we
+  // hold; else an UPDATE is 'ambiguous' (a PATCH miss moves it to the rejected list, never an insert); a creation stays a creation.
+  Store.prototype._legacyKnown = function (p) {
+    if (p.known === 'ambiguous') return this.known.has(p.table + ':' + p.row.id) ? true : 'ambiguous';
+    if (p.known !== undefined) return !!p.known;
+    if (this.known.has(p.table + ':' + p.row.id) || (this.snapKnown && this.snapKnown.has(p.table + ':' + p.row.id))) return true;
+    return p.changed ? 'ambiguous' : false;
+  };
+  // R13 r3: ONE rule for the provenance of a write that replaces / re-queues an earlier entry (outbox, rejected list, edit, retry):
+  // the server rows we hold win; else the earlier entry's provenance carries over (decoded like a legacy entry); no entry = not known.
+  Store.prototype._carryKnown = function (table, id, from) {
+    if (this.known.has(table + ':' + id)) return true;
+    return from ? this._legacyKnown(from) : false;
+  };
+  Store.prototype._markKnown = function (lists) {
+    var k = this.known = new Set(); TABLES.forEach(function (n) { (lists[n] || []).forEach(function (r) { k.add(n + ':' + r.id); }); });
+  };
   Store.prototype.load = function () {
     var self = this;
     if (this._ldp) return this._ldp;
@@ -810,6 +834,8 @@
     var got = !this.leaseOn || this.writer || await this._claim();
     await this.a.init();
     var lists = {}, self = this;
+    this.snapKnown = new Set(); // R13 r2: rows of the PREVIOUS snapshot = evidence the server had them (read before it is overwritten)
+    try { var ps = this._readSnap(); if (ps) TABLES.forEach(function (n) { (ps[n] || []).forEach(function (r) { self.snapKnown.add(n + ':' + r.id); }); }); } catch (e) { /* no snapshot */ }
     try {
       for (var i = 0; i < TABLES.length; i++) lists[TABLES[i]] = await this.a.list(TABLES[i]);
       this.offline = false;
@@ -822,6 +848,7 @@
     if (!this.offline) { await this._probeCaps(); await this._loadTombs(); this._saveSnap(lists); } // neither throws
     else this.tombs = new Map((lists.tombs || []).map(function (r) { return [r.id, r]; }));
     TABLES.forEach(function (n) { self.t[n] = new Map(lists[n].map(function (r) { return [r.id, r]; })); });
+    this._markKnown(lists); // R13: rows the server had (live load or its snapshot)
     this.writer = got; if (got) this.gen++; // only now (nothing awaited from here to the end of adoption) are writes enabled
     if (!this.writer) { this.status = 'saved'; this._emit(); return; } // read-only tab: server data only, the outbox belongs to the writer
     // unsent work from earlier sessions (a dead tab's outbox is adopted here, once)
@@ -830,7 +857,7 @@
       // a login after a session loss reloads in the same page: never queue (or overwrite) what is already in memory
       if (self.pending.some(function (x) { return x.table === p.table && x.id === p.row.id; })) return;
       self.t[p.table].set(p.row.id, p.row);
-      self.pending.push({ table: p.table, id: p.row.id, row: p.row, rev: 0, changed: p.changed === undefined ? null : p.changed, extra: p.extra, stamp: p.stamp || newStamp() });
+      self.pending.push({ table: p.table, id: p.row.id, row: p.row, rev: 0, changed: p.changed === undefined ? null : p.changed, extra: p.extra, stamp: p.stamp || newStamp(), known: self._carryKnown(p.table, p.row.id, p) });
     });
     this.pending.forEach(function (p) { self.t[p.table].set(p.id, p.row); });
     // refused work from earlier sessions stays visible
@@ -849,9 +876,9 @@
   Store.prototype.refresh = async function () {
     var ver = this._ver, fresh = {}, self = this;
     for (var i = 0; i < TABLES.length; i++) fresh[TABLES[i]] = await this.a.list(TABLES[i]);
-    var capsBefore = this.caps.reps, bwBefore = this.caps.bw; await this._probeCaps(); await this._loadTombs();
+    var capsBefore = this.caps.reps, bwBefore = this.caps.bw, delBefore = this.caps.del; await this._probeCaps(); await this._loadTombs();
     if (ver !== this._ver) return false;
-    var changed = this.offline || capsBefore !== this.caps.reps || bwBefore !== this.caps.bw;
+    var changed = this.offline || capsBefore !== this.caps.reps || bwBefore !== this.caps.bw || delBefore !== this.caps.del;
     this.offline = false;
     TABLES.forEach(function (t) {
       var m = new Map(fresh[t].map(function (r) { return [r.id, r]; }));
@@ -862,7 +889,7 @@
       else m.forEach(function (r, id) { if (!old.has(id) || stable(old.get(id)) !== stable(r)) changed = true; });
       self.t[t] = m;
     });
-    this._saveSnap(fresh);
+    this._saveSnap(fresh); this._markKnown(fresh); // R13: refresh = the server's current rows
     if (changed) this._emit();
     return changed;
   };
@@ -888,7 +915,7 @@
       if (hit.changed === null && changedNow) hit.extra = unionCols(hit.extra || [], changedNow); // an edit of a still-pending creation: sent as a PATCH after the insert-only POST
       hit.row = row; hit.rev++; hit.stamp = newStamp(); hit.changed = unionCols(hit.changed, changedNow);
     }
-    else this.pending.push({ table: table, id: row.id, row: row, rev: 0, changed: changedNow, stamp: newStamp() });
+    else this.pending.push({ table: table, id: row.id, row: row, rev: 0, changed: changedNow, stamp: newStamp(), known: this._carryKnown(table, row.id, refused) }); // R13 r1: the "server has it" fact travels with the write (outbox, rejected list, restart)
     this._ver++;
     this._persistPending();
     if (!this.memoryOnly) this.status = 'saving';
@@ -905,12 +932,14 @@
     while (this.pending.length) {
       if (this._stale(gen)) return true; // never send once another tab owns the outbox
       var item = this.pending[0], rev = item.rev;
-      try { await this.a.put(item.table, item.row, item.changed, item.extra); }
+      var res;
+      var kn = this._carryKnown(item.table, item.row.id, item);
+      try { res = await this.a.put(item.table, item.row, item.changed, item.extra, kn); }
       catch (e) {
         if (this._stale(gen)) return true; // ownership changed while the request was out: touch nothing
         if (e && e.permanent && item.rev === rev) { // never block the queue behind a row the server will not take
           this.pending.splice(this.pending.indexOf(item), 1); this._ver++;
-          this.rejected.push({ table: item.table, row: item.row, changed: item.changed, extra: item.extra, status: e.status, error: String(e.message || e) });
+          this.rejected.push({ table: item.table, row: item.row, changed: item.changed, extra: item.extra, status: e.status, error: String(e.message || e), known: this._carryKnown(item.table, item.row.id, item) });
           this._persistPending(); this._persistRejected();
           this.lastError = String(e.message || e);
           continue;
@@ -920,6 +949,20 @@
       }
       if (this._stale(gen)) return true; // (a stale response must not remove, persist or report anything)
       this._ver++;
+      if (res === 'missing') { // R13 r2: a pre-R13 queued UPDATE of a row the server does not have and we cannot prove existed: never insert it
+        this.pending.splice(this.pending.indexOf(item), 1);
+        this.rejected.push({ table: item.table, row: item.row, changed: item.changed, extra: item.extra, status: 404, error: 'row not found on the server (update queued by an older version)', ko: '서버에서 찾을 수 없어 보내지 않았어요 (예전 버전에서 남은 수정)', known: 'ambiguous' });
+        this._persistPending(); this._persistRejected(); continue;
+      }
+      if (res === 'gone') { // R13: the server no longer has this row: drop the local copy and every queued write for it (no re-creation)
+        var gk = item.table, gid = item.row.id;
+        this.pending = this.pending.filter(function (p) { return !(p.table === gk && p.row.id === gid); });
+        this.t[gk].delete(gid); this.known.delete(gk + ':' + gid); this._persistPending(); continue;
+      }
+      if (!item.changed) { // created + acked = the server has it: every later write of this row knows it too (persisted)
+        var ak = item.table, aid = item.row.id; this.known.add(ak + ':' + aid);
+        this.pending.forEach(function (p) { if (p.table === ak && p.row.id === aid) p.known = true; });
+      }
       if (item.rev === rev) { var ix = this.pending.indexOf(item); if (ix >= 0) this.pending.splice(ix, 1); } // exact operation identity, never shift(); else a newer version was queued meanwhile: write it next
       this._persistPending();
     }
@@ -946,7 +989,7 @@
     if (!this._owns()) return false; // a stale former holder must not touch either queue
     var self = this, back = this.rejected; this.rejected = [];
     back.forEach(function (r) {
-      self.pending.push({ table: r.table, id: r.row.id, row: r.row, rev: 0, changed: r.changed === undefined ? null : r.changed, extra: r.extra, stamp: newStamp() });
+      self.pending.push({ table: r.table, id: r.row.id, row: r.row, rev: 0, changed: r.changed === undefined ? null : r.changed, extra: r.extra, stamp: newStamp(), known: self._carryKnown(r.table, r.row.id, r) });
     });
     this._persistRejected(); this._persistPending(); this.status = this._idleStatus(); this._emit();
     var ok = await this.flush();
@@ -963,8 +1006,32 @@
   Store.prototype.members = function (inc) {
     return this._all('members', inc).sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
   };
+  // R13: a DELETED exercise (soft flag, migration-006) is gone from every list and picker and from 운동 관리; its records stay
+  // (history, 성장 via growthExercises, 달력 popup, export). exercises(true) = the 운동 관리 view (active + archived).
   Store.prototype.exercises = function (inc) {
-    return this._all('exercises', inc).sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+    return this._all('exercises', inc).filter(function (e) { return !e.deleted; }).sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+  };
+  Store.prototype.manageExercises = function () { // 운동 관리: active first, then archived; 가나다 inside each group
+    return this.exercises(true).sort(function (a, b) { return (a.archived ? 1 : 0) - (b.archived ? 1 : 0) || a.name.localeCompare(b.name, 'ko') || BODY_PARTS.indexOf(a.body_part) - BODY_PARTS.indexOf(b.body_part); });
+  };
+  Store.prototype.deletedExercises = function () { return this._all('exercises', true).filter(function (e) { return e.deleted; }).sort(function (a, b) { return a.name.localeCompare(b.name, 'ko'); }); };
+  Store.prototype.growthExercises = function () { return this._all('exercises', true).sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; }); }; // incl. archived + deleted: 성장 shows whatever has records
+  Store.prototype.supportsDelete = function () { if (!this.a.remote) return true; return this.caps.del === true; };
+  Store.prototype.deleteExercise = function (id) {
+    var e = this.exercise(id); if (!e) throw new Error('no exercise');
+    if (!this.supportsDelete()) throw new Error('delete unsupported'); // before migration-006: nothing is sent
+    var inverse = [exUndo(e, 'deleted')]; // R13 r1/r2: undo sends deleted=false explicitly, applied to the current row
+    this._commit('exercises', Object.assign({}, e, { deleted: true }));
+    return inverse;
+  };
+  // 되살리기: deleted=false; refused when a live exercise with the same name + part exists now (an archived one comes back archived)
+  Store.prototype.restoreDeleted = function (id) {
+    var e = this.exercise(id); if (!e) throw new Error('no exercise');
+    if (!this.supportsDelete()) throw new Error('delete unsupported');
+    if (!e.archived && this._nameTaken(e.name, e.body_part, id)) throw new Error('duplicate exercise');
+    var inverse = [exUndo(e, 'deleted')];
+    this._commit('exercises', Object.assign({}, e, { deleted: false }));
+    return inverse;
   };
   Store.prototype.member = function (id) { return this.t.members.get(id) || null; };
   Store.prototype.exercise = function (id) { return this.t.exercises.get(id) || null; };
@@ -1246,7 +1313,7 @@
   // bp = a body part, or null for ALL parts (sorted by body-part order, then name)
   Store.prototype.bodyPartSummary = function (bp, o) {
     var self = this;
-    var list = this.exercises(true).filter(function (e) { return bp === null || bp === undefined || e.body_part === bp; });
+    var list = this.growthExercises().filter(function (e) { return bp === null || bp === undefined || e.body_part === bp; });
     if (bp === null || bp === undefined) list.sort(function (a, b) { return BODY_PARTS.indexOf(a.body_part) - BODY_PARTS.indexOf(b.body_part) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0); });
     return list.map(function (e) {
       var pts = self.seriesFor(e.id, o);
@@ -1455,9 +1522,8 @@
   // R12: a kind change with sets (deleted ones count: undo could bring them back)
   Store.prototype.needsSplit = function (id, patch) {
     var e = this.exercise(id); if (!e || !patch || patch.body_part === undefined) return false;
-    if (kindOf(e) === kindOf({ body_part: patch.body_part })) return false;
-    for (var it = this.t.sets.values(), r = it.next(); !r.done; r = it.next()) if (r.value.exercise_id === id) return true;
-    return false;
+    if (family(kindOf(e)) === family(kindOf({ body_part: patch.body_part }))) return false; // 근력 <-> 맨몸: in place, never a split
+    return true; // R13 r2: across the 유산소 boundary ALWAYS archive-and-create (another device may hold sets this cache does not show)
   };
   // R12 section 7: change the kind of an exercise that has records WITHOUT touching any set row: the old exercise is archived
   // (name, memo, sets, photo stay; it keeps its own body part so name+part never collides), a NEW exercise is created
@@ -1466,17 +1532,19 @@
   Store.prototype.splitExercise = function (id, patch) {
     var e = this.exercise(id); if (!e) throw new Error('no exercise');
     assertBodyPart(patch.body_part); this._partAllowed(patch.body_part, e.body_part);
-    if (kindOf(e) === kindOf({ body_part: patch.body_part })) throw new Error('no kind change');
+    if (family(kindOf(e)) === family(kindOf({ body_part: patch.body_part }))) throw new Error('no kind change'); // R13 r1: only across 유산소
     var name = patch.name !== undefined ? cleanName(patch.name) : e.name, memo = patch.memo !== undefined ? cleanMemo(patch.memo) : (e.memo || '');
     if (this._nameTaken(name, patch.body_part, id)) throw new Error('duplicate exercise');
     var prev = clone(e);
     this._commit('exercises', Object.assign({}, e, { archived: true }));
     var f = { name: name, body_part: patch.body_part, archived: false }; if (this.supportsMemo()) f.memo = memo;
     var created = this._newRow('exercises', f);
-    return { old: this.exercise(id), created: created, inverse: [{ table: 'exercises', prev: prev }, { table: 'exercises', prev: Object.assign(clone(created), { archived: true }) }] };
+    return { old: this.exercise(id), created: created, inverse: [exUndo(prev, 'archived'), { table: 'exercises', id: created.id, patch: { archived: true }, family: family(kindOf(created)) }] };
   };
+  // R13 r2: an exercise undo entry = the ONE field change to revert + the family it assumed; undo applies it to the CURRENT row
+  function exUndo(e, field) { var p = {}; p[field] = e[field] === undefined ? false : e[field]; return { table: 'exercises', id: e.id, patch: p, family: family(kindOf(e)) }; }
   Store.prototype.archiveExercise = function (id, flag) {
-    var e = this.exercise(id), inverse = [{ table: 'exercises', prev: clone(e) }];
+    var e = this.exercise(id), inverse = [exUndo(e, 'archived')];
     if (flag === false && e.archived && this._nameTaken(e.name, e.body_part, id)) throw new Error('duplicate exercise'); // R12: restore into a collision
     this._commit('exercises', Object.assign({}, e, { archived: flag !== false }));
     return inverse;
@@ -1488,7 +1556,20 @@
   };
   Store.prototype.undo = function (inverse) {
     var self = this;
-    inverse.forEach(function (i) { self._commit(i.table, i.prev, false); }); // exact snapshot, no re-stamp
+    inverse.forEach(function (i) { // R13 r2: exercise entries patch the CURRENT row; refused if its family changed or it would collide
+      if (!i.patch) return;
+      var cur = self.exercise(i.id); if (!cur) throw new Error('no exercise');
+      if (family(kindOf(cur)) !== i.family) throw new Error('kind change: undo after the exercise changed family');
+      var nx = Object.assign({}, cur, i.patch); if (!nx.archived && !nx.deleted && self._nameTaken(nx.name, nx.body_part, i.id)) throw new Error('duplicate exercise');
+    });
+    inverse.forEach(function (i) { // R13: never revive a set under an exercise whose kind changed meanwhile (checked before anything is written)
+      if (i.table !== 'sets' || i.prev.deleted) return;
+      var ex = self.exercise(i.prev.exercise_id); if (ex && !setFitsKind(i.prev, kindOf(ex))) throw new Error('kind change: undo would bring back a set of another kind');
+    });
+    inverse.forEach(function (i) {
+      if (i.patch) self._commit('exercises', Object.assign({}, self.exercise(i.id), i.patch)); // only the flag, on the current row
+      else self._commit(i.table, i.prev, false); // sets / workouts / members: exact snapshot, no re-stamp
+    });
   };
 
   // ---- export / import ----
@@ -1514,7 +1595,7 @@
     function str(v) { return typeof v === 'string' && v.length > 0; }
     o.members.forEach(function (r) { if (!r || !str(r.id) || !str(r.name) || typeof r.archived !== 'boolean') bad('member row'); });
     o.exercises.forEach(function (r) {
-      if (!r || !str(r.id) || !str(r.name) || typeof r.archived !== 'boolean') bad('exercise row');
+      if (!r || !str(r.id) || !str(r.name) || typeof r.archived !== 'boolean' || (r.deleted !== undefined && typeof r.deleted !== 'boolean')) bad('exercise row');
       if (BODY_PARTS.indexOf(r.body_part) < 0) bad('exercise body_part');
       if (r.memo !== undefined && r.memo !== null && typeof r.memo !== 'string') bad('exercise memo');
     });
@@ -1562,13 +1643,12 @@
     rows.exercises.forEach(function (r) { exAfter.set(r.id, r); }); rows.sets.forEach(function (r) { setsAfter.set(r.id, r); });
     // R12: three kinds. cardio = minutes; 맨몸 = reps (weight optional), never a warm-up / minutes; strength = weight unless warm-up.
     setsAfter.forEach(function (r) {
-      var ex = exAfter.get(r.exercise_id); if (!ex) return;
-      var k = kindOf(ex), sk = has(r.minutes) ? 'cardio' : ((!has(r.weight) && !r.is_warmup) || has(r.seconds)) ? 'bw' : 'str';
-      var ok = k === 'cardio' ? sk === 'cardio' : k === 'bw' ? sk !== 'cardio' && !r.is_warmup && (has(r.reps) !== has(r.seconds)) : sk === 'str';
-      if (!ok) throw new Error('import rejected: kind mismatch (' + sk + ' set under ' + k + ' exercise "' + ex.name + '")');
+      var ex = exAfter.get(r.exercise_id); if (!ex) return; // R13 r1: deleted sets too (a cardio boundary change always splits, so they always fit)
+      var k = kindOf(ex), sk = setKind(r);
+      if (!setFitsKind(r, k)) throw new Error('import rejected: kind mismatch (' + sk + ' set under ' + k + ' exercise "' + ex.name + '")');
     });
     var seen = {}; // R12 section 8: live exercises are unique by name + body part
-    exAfter.forEach(function (e) { if (e.archived) return; var key = e.name + '\u0000' + e.body_part; if (seen[key]) throw new Error('import rejected: duplicate exercise "' + e.name + '" (' + e.body_part + ')'); seen[key] = 1; });
+    exAfter.forEach(function (e) { if (e.archived || e.deleted) return; var key = e.name + '\u0000' + e.body_part; if (seen[key]) throw new Error('import rejected: duplicate exercise "' + e.name + '" (' + e.body_part + ')'); seen[key] = 1; });
     TABLES.forEach(function (t) { rows[t].forEach(function (r) { self._commit(t, r, false); }); });
     await this.flush();
     return TABLES.reduce(function (acc, t) { acc[t] = o[t].length; return acc; }, {});
@@ -1646,6 +1726,17 @@
     return { ym: ym, prev: shift(-1), next: shift(1), weeks: weeks };
   }
 
+  // R13: the kind of one set row and whether it may sit under an exercise of kind k (one place: import + undo)
+  function setKind(r) { return has(r.minutes) ? 'cardio' : ((!has(r.weight) && !r.is_warmup) || has(r.seconds)) ? 'bw' : 'str'; }
+  // R13 r1 (CEO): two families only. 근력 and 맨몸 share rows (weight+reps fits 맨몸 via +무게, reps-only fits 근력 since 005), so a
+  // change between them is always in place; only 유산소 (minutes) vs the rest is incompatible.
+  function family(k) { return k === 'cardio' ? 'cardio' : 'lift'; }
+  function setFitsKind(r, k) { return (setKind(r) === 'cardio') === (k === 'cardio'); }
+  // R13 운동 관리 search: name or body part, like the picker; empty query = all
+  function filterExercises(list, q) {
+    q = String(q || '').trim().toLowerCase();
+    return list.filter(function (e) { return !q || e.name.toLowerCase().indexOf(q) >= 0 || e.body_part.indexOf(q) >= 0; });
+  }
   // R12 calendar cell labels (390px: a cell is ~50px wide): at most `max` part names, the rest as "+n" in the last slot
   // pass 2 (CEO): up to 3 labels stacked, 2-char forms (유산소 -> 유산), "+n" only beyond 3
   var SHORT_PART = { '유산소': '유산' };
@@ -1672,6 +1763,6 @@
     delta: delta, MemoryStorage: MemoryStorage, LocalAdapter: LocalAdapter, SupabaseAdapter: SupabaseAdapter,
     SbClient: SbClient, SupabaseAuth: SupabaseAuth, emailFor: emailFor, Store: Store, LocalAuth: LocalAuth, sha256Hex: sha256Hex, workoutId: workoutId, rangeBounds: rangeBounds, validDate: validDate, validateImport: validateImport, todayStr: todayStr, addDays: addDays,
     volumeOf: volumeOf, fmtVolume: fmtVolume, lastLineText: lastLineText, weekStart: weekStart, calendarMonth: calendarMonth, isCardio: isCardio, CARDIO_PART: CARDIO_PART, CARDIO_GOAL: CARDIO_GOAL,
-    BW_PART: BW_PART, isBodyweight: isBodyweight, kindOf: kindOf, displaySet: displaySet, totalReps: totalReps, totalSeconds: totalSeconds, fmtDuration: fmtDuration, suggestBwMode: suggestBwMode, partLabels: partLabels, pickerGroups: pickerGroups
+    BW_PART: BW_PART, isBodyweight: isBodyweight, kindOf: kindOf, displaySet: displaySet, totalReps: totalReps, totalSeconds: totalSeconds, fmtDuration: fmtDuration, suggestBwMode: suggestBwMode, filterExercises: filterExercises, partLabels: partLabels, pickerGroups: pickerGroups
   };
 });
