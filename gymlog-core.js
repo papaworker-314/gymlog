@@ -15,6 +15,9 @@
   function isBodyweight(ex) { return !!ex && ex.body_part === BW_PART; }
   // the entry kind of an exercise, decided by its body part: 'cardio' (분/km), 'bw' (횟수, weight optional) or 'str' (무게/횟수)
   function kindOf(ex) { return isCardio(ex) ? 'cardio' : isBodyweight(ex) ? 'bw' : 'str'; }
+  // R15 (owner: "플랭크만 초 단위"): a 플랭크 in a strength body part (복근 etc.) is a timed hold: 초 + optional 무게, no reps.
+  // kindOf (the family rules) is unchanged; the entry kind is Store.entryKind ('hold').
+  function isTimedHold(ex) { return kindOf(ex) === 'str' && String(ex.name || '').replace(/\s+/g, '').indexOf('플랭크') >= 0; }
   var MEMO_MAX = 200;
   var SEED_EXERCISES = [
     { name: '트라이셉스벤치프레스', body_part: '삼두' },
@@ -114,7 +117,7 @@
   }
   function formatSets(list) { return list.map(formatSet).join(' - '); }
   // what the screens show for one set (R12): like formatSet, but a reps-only set reads `15회` instead of `(15)`
-  function displaySet(s) { return has(s.seconds) ? formatSet(s) : !has(s.minutes) && !has(s.weight) && !s.is_warmup && has(s.reps) ? s.reps + '회' : formatSet(s); }
+  function displaySet(s) { return has(s.seconds) ? (has(s.weight) ? fmtNum(s.weight) + ' kg ' : '') + s.seconds + '초' : !has(s.minutes) && !has(s.weight) && !s.is_warmup && has(s.reps) ? s.reps + '회' : formatSet(s); }
   // weight chips (+2.5/+5/-2.5): `cur` is the field text; empty/unreadable -> `fallback` (or 0). Never below 0 or above MAX_NUM.
   function nudge(cur, delta, fallback) {
     var t = String(cur === undefined || cur === null ? '' : cur).trim(), base = /^\d+(\.\d+)?$/.test(t) ? Number(t) : (fallback === null || fallback === undefined ? 0 : Number(fallback));
@@ -137,7 +140,7 @@
     }
     function int(v) { if (!filled(v)) return null; var s = String(v).trim(); return /^\d+$/.test(s) ? Number(s) : NaN; }
     var sec = int(f.seconds), secGiven = filled(f.seconds);
-    if (secGiven && kind !== 'bw') return { ok: false, error: kind === 'cardio' ? 'cardio' : 'seconds' }; // seconds belong to 맨몸 exercises
+    if (secGiven && kind !== 'bw' && kind !== 'hold') return { ok: false, error: kind === 'cardio' ? 'cardio' : 'seconds' }; // seconds belong to 맨몸 exercises
     var note = String(f.note || '').trim(), dropsGiven = Array.isArray(f.drops) ? f.drops.length > 0 : filled(f.drops);
     if (kind === 'cardio') {
       if (f.is_warmup || filled(f.weight) || filled(f.reps) || dropsGiven) return { ok: false, error: 'cardio' };
@@ -146,6 +149,12 @@
       return { ok: true, value: { is_warmup: false, weight: null, reps: null, minutes: mi, distance: di, drops: null, note: note } };
     }
     if (filled(f.minutes) || filled(f.distance)) return { ok: false, error: 'minutes' }; // minutes belong to cardio exercises
+    if (kind === 'hold') { // R15 플랭크 (strength part): 초 required, 무게 optional, no reps / warm-up / drops
+      if (f.is_warmup || dropsGiven) return { ok: false, error: 'hold' };
+      if (filled(f.reps) || !secGiven || !okSec(sec)) return { ok: false, error: 'seconds' };
+      var hw = num(f.weight); if (hw !== null && !okNum(hw)) return { ok: false, error: 'weight' };
+      return { ok: true, value: { is_warmup: false, weight: hw, reps: null, seconds: sec, minutes: null, distance: null, drops: null, note: note } };
+    }
     var reps = int(f.reps); if (reps !== null && !okReps(reps)) return { ok: false, error: 'reps' };
     if (kind === 'bw') { // 맨몸: reps required, weight optional (+무게), no warm-up, no drops
       if (f.is_warmup || dropsGiven) return { ok: false, error: 'bw' };
@@ -1144,7 +1153,7 @@
       if (days[d].some(function (s) { return !s.is_warmup; }) && (!last || d > last)) last = d;
     });
     if (!last) return { line: '', volume: null, best: best };
-    if (isBodyweight(this.exercise(exerciseId))) { // R12 맨몸: no 합계/최고 (weight is optional); display format + total reps
+    if (isBodyweight(this.exercise(exerciseId)) || this.entryKind(exerciseId) === 'hold') { // R12 맨몸 (R15: and 플랭크): no 합계/최고 (weight is optional); display format + total reps
       var ws = days[last].filter(function (s) { return !s.is_warmup; });
       return { bw: true, line: ws.map(displaySet).join(' - '), volume: null, best: null, reps: totalReps(ws), total: bwTotalText(ws) };
     }
@@ -1153,7 +1162,7 @@
   // running 합계 of one exercise block / of the whole day (always recomputed from Store data)
   // R12: 맨몸 exercises never count in 합계 (block or day); they show 총 N회 instead (exerciseReps)
   Store.prototype.exerciseVolume = function (wid, exerciseId) { return isBodyweight(this.exercise(exerciseId)) ? null : volumeOf(this.setsForWorkout(wid).filter(function (s) { return s.exercise_id === exerciseId; })); };
-  Store.prototype.exerciseTotalText = function (wid, exerciseId) { return isBodyweight(this.exercise(exerciseId)) ? bwTotalText(this.setsForWorkout(wid).filter(function (s) { return s.exercise_id === exerciseId; })) : ''; };
+  Store.prototype.exerciseTotalText = function (wid, exerciseId) { return isBodyweight(this.exercise(exerciseId)) || this.entryKind(exerciseId) === 'hold' ? bwTotalText(this.setsForWorkout(wid).filter(function (s) { return s.exercise_id === exerciseId; })) : ''; };
   // R12 pass 2: the 맨몸 entry mode follows the unit of this member's LAST set of this exercise ('sec' | 'reps'): no stored
   // setting, no migration, same on every device. The UI may override it until the next render of another day.
   Store.prototype.bwMode = function (memberId, exerciseId) {
@@ -1180,10 +1189,10 @@
   // logged order inside a part; total = `합계 1,420` (strength, '' when nothing countable) / `총 45회` (맨몸) / `총 30분 · 5.2km` (cardio)
   Store.prototype.dayDetail = function (memberId, date) {
     var w = this.workoutFor(memberId, date); if (!w) return [];
-    var groups = {};
+    var groups = {}, self = this;
     this.blocksForWorkout(w.id).forEach(function (b) {
-      var k = kindOf(b.exercise), total = '';
-      if (k === 'bw') total = bwTotalText(b.sets);
+      var k = self.entryKind(b.exercise.id), total = '';
+      if (k === 'bw' || k === 'hold') total = bwTotalText(b.sets);
       else if (k === 'cardio') {
         var mi = 0, km = null; b.sets.forEach(function (x) { if (has(x.minutes)) mi += x.minutes; if (has(x.distance)) km = (km || 0) + x.distance; });
         total = '총 ' + fmtNum(Math.round(mi * 1000) / 1000) + '분' + (km === null ? '' : ' · ' + fmtNum(Math.round(km * 1000) / 1000) + 'km');
@@ -1235,10 +1244,13 @@
     if (!blocks.length) throw new Error('nothing to copy');
     var res = { sets: 0, exercises: blocks.length, exerciseIds: blocks.map(function (b) { return b.exercise.id; }), ids: [] };
     if (!(opts && opts.sets)) return res;
+    // R15 r2: every copy is validated by its SOURCE row (an old weight-only plank row stays weight-only) and the WHOLE list is
+    // checked before the destination workout or any row exists: one bad row -> nothing written
+    var plan = [];
+    blocks.forEach(function (b) { b.sets.forEach(function (s) { plan.push({ ex: b.exercise.id, src: s, f: { weight: s.weight, reps: s.reps, seconds: s.seconds, minutes: s.minutes, distance: s.distance, drops: s.drops, note: s.note, is_warmup: s.is_warmup } }); }); });
+    plan.forEach(function (p) { self._setValue(p.ex, p.f, p.src); });
     var w = this.getOrCreateWorkout(toMember, toDate);
-    blocks.forEach(function (b) {
-      b.sets.forEach(function (s) { res.ids.push(self.addSet(w.id, b.exercise.id, { weight: s.weight, reps: s.reps, minutes: s.minutes, distance: s.distance, drops: s.drops, note: s.note, is_warmup: s.is_warmup }).id); res.sets++; });
-    });
+    plan.forEach(function (p) { res.ids.push(self.addSet(w.id, p.ex, p.f, p.src).id); res.sets++; });
     return res;
   };
   Store.prototype.undoCopy = function (res) {
@@ -1285,6 +1297,14 @@
       var mi = 0, km = null; ss.forEach(function (s) { mi += s.minutes; if (has(s.distance)) km = (km || 0) + s.distance; });
       return { date: d, minutes: Math.round(mi * 1000) / 1000, distance: km === null ? null : Math.round(km * 1000) / 1000, count: ss.length };
     }).filter(Boolean);
+  };
+  // R15 플랭크 성장: per date {date, count (live sets), total seconds, longest set}; a day without seconds keeps total/max null
+  Store.prototype.secondsSeries = function (exerciseId, o) {
+    var perDate = this._perDate(exerciseId, o);
+    return Object.keys(perDate).sort().map(function (d) {
+      var ss = perDate[d], mx = null; ss.forEach(function (s) { if (has(s.seconds) && (mx === null || s.seconds > mx)) mx = s.seconds; });
+      return { date: d, count: ss.length, total: totalSeconds(ss), max: mx };
+    });
   };
   // Growth table / volume rows: the UNION of the avg/max dates (seriesFor, honours includeWarmup) and the volume dates
   // (volumeSeries: warm-ups with weight+reps always count), ascending: {date, count, avg, max, vol} (missing parts null).
@@ -1465,9 +1485,20 @@
   };
   // Validated set columns for this exercise (its body part decides strength vs cardio). Before migration-004 the new
   // columns are not even put on the row (the server would refuse them); a reps/cardio value is refused locally instead.
-  Store.prototype._setValue = function (exerciseId, fields) {
+  // R15: the entry kind of an exercise: kindOf, except a strength exercise is 'hold' (초 + optional 무게) when its name has 플랭크
+  // or it still has live seconds sets (renamed away from 플랭크: keeps 초 mode). Needs the seconds column (migration-005).
+  Store.prototype.entryKind = function (exerciseId) {
+    var ex = this.exercise(exerciseId), k = kindOf(ex);
+    if (k !== 'str' || !ex || !this.supportsBodyweight()) return k;
+    if (isTimedHold(ex)) return 'hold';
+    return this._liveSets().some(function (s) { return s.exercise_id === exerciseId && has(s.seconds); }) ? 'hold' : 'str';
+  };
+  // `row` = the set being edited, or the SOURCE row of a copy (R15 r2): an old weight-only row of a hold exercise (no seconds, none given) keeps the strength rules
+  Store.prototype._setValue = function (exerciseId, fields, row) {
     var ex = this.exercise(exerciseId); if (!ex) throw new Error('no exercise');
-    var k = kindOf(ex), v = validateSetFields(fields, k === 'str' ? null : k);
+    var k = this.entryKind(exerciseId);
+    if (k === 'hold' && row && !has(row.seconds) && !filled(fields.seconds)) k = 'str';
+    var v = validateSetFields(fields, k === 'str' ? null : k);
     if (!v.ok) throw new Error('invalid set: ' + v.error);
     if (k === 'bw' && !this.supportsBodyweight()) throw new Error('bodyweight unsupported');
     if (!this.supportsReps()) {
@@ -1477,8 +1508,12 @@
     }
     return v.value;
   };
-  Store.prototype.addSet = function (workoutId, exerciseId, fields) {
-    var val = this._setValue(exerciseId, fields);
+  // R15 r2: whole-list check without writing anything (copies: srcs[i] = the source row of list[i], or null for a new entry)
+  Store.prototype.validateSets = function (exerciseId, list, srcs) {
+    var self = this; list.forEach(function (f, i) { self._setValue(exerciseId, f, srcs ? srcs[i] : null); }); return true;
+  };
+  Store.prototype.addSet = function (workoutId, exerciseId, fields, src) {
+    var val = this._setValue(exerciseId, fields, src);
     var pos = this.setsForWorkout(workoutId).reduce(function (m, s) { return Math.max(m, s.position); }, 0) + 1;
     return this._newRow('sets', Object.assign({
       workout_id: workoutId, exercise_id: exerciseId, position: pos, deleted: false
@@ -1500,7 +1535,7 @@
     }
     fields = Object.assign({}, fields);
     ['drops', 'reps', 'minutes', 'distance', 'seconds'].forEach(function (k) { if (!(k in fields)) fields[k] = cur[k]; });
-    var val = this._setValue(s.exercise_id, fields);
+    var val = this._setValue(s.exercise_id, fields, s);
     var inverse = [{ table: 'sets', prev: clone(s) }];
     this._commit('sets', Object.assign({}, s, val));
     return inverse;
@@ -1763,6 +1798,6 @@
     delta: delta, MemoryStorage: MemoryStorage, LocalAdapter: LocalAdapter, SupabaseAdapter: SupabaseAdapter,
     SbClient: SbClient, SupabaseAuth: SupabaseAuth, emailFor: emailFor, Store: Store, LocalAuth: LocalAuth, sha256Hex: sha256Hex, workoutId: workoutId, rangeBounds: rangeBounds, validDate: validDate, validateImport: validateImport, todayStr: todayStr, addDays: addDays,
     volumeOf: volumeOf, fmtVolume: fmtVolume, lastLineText: lastLineText, weekStart: weekStart, calendarMonth: calendarMonth, isCardio: isCardio, CARDIO_PART: CARDIO_PART, CARDIO_GOAL: CARDIO_GOAL,
-    BW_PART: BW_PART, isBodyweight: isBodyweight, kindOf: kindOf, displaySet: displaySet, totalReps: totalReps, totalSeconds: totalSeconds, fmtDuration: fmtDuration, suggestBwMode: suggestBwMode, filterExercises: filterExercises, partLabels: partLabels, pickerGroups: pickerGroups
+    BW_PART: BW_PART, isBodyweight: isBodyweight, kindOf: kindOf, isTimedHold: isTimedHold, displaySet: displaySet, totalReps: totalReps, totalSeconds: totalSeconds, fmtDuration: fmtDuration, suggestBwMode: suggestBwMode, filterExercises: filterExercises, partLabels: partLabels, pickerGroups: pickerGroups
   };
 });

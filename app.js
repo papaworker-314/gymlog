@@ -263,7 +263,7 @@
   }
 
   function blockHtml(ex, sets, wid) {
-    var cardio = GL.isCardio(ex), bw = GL.isBodyweight(ex), reps = store.supportsReps();
+    var cardio = GL.isCardio(ex), bw = GL.isBodyweight(ex), reps = store.supportsReps(), hold = store.entryKind(ex.id) === 'hold'; // R15 플랭크: 초 + 무게(선택)
     var rows = sets.map(function (s, i) {
       return '<div class="setrow"><span class="idx">' + (i + 1) + '</span><button class="txt" data-act="editset" data-id="' + esc(s.id) + '">' +
         (store.isRejected('sets', s.id) ? '<span class="tag reject">서버 거부</span> ' : '') + (s.is_warmup ? '<span class="tag">웜업</span> ' : '') + setMain(s) + dropsHtml(s) + legacyHtml(s) + (s.note ? ' <span class="muted">' + esc(s.note) + '</span>' : '') + '</button>' +
@@ -273,13 +273,18 @@
     var prevSess = store.lastSession(S.view, ex.id, S.date), info = store.lastInfo(S.view, ex.id, S.date), lastLine = GL.lastLineText(info);
     var kp = S.keep[ex.id] || {}, kv = function (k) { return has(kp[k]) && kp[k] !== '' ? ' value="' + esc(kp[k]) + '"' : ''; }; // P2: last values stay in the fields
     var mode = S.bwMode[ex.id] || store.bwMode(S.view, ex.id); // pass 2: 횟수 | 초, default = unit of the last set
-    var vol = wid && !cardio ? store.exerciseVolume(wid, ex.id) : null; // running 합계 of this block, from Store data (null for 맨몸)
-    var totr = wid && bw ? store.exerciseTotalText(wid, ex.id) : ''; // R12 맨몸: 총 N회 / 총 2분 15초 instead of 합계
+    var vol = wid && !cardio && !hold ? store.exerciseVolume(wid, ex.id) : null; // running 합계 of this block, from Store data (null for 맨몸)
+    var totr = wid && (bw || hold) ? store.exerciseTotalText(wid, ex.id) : ''; // R12 맨몸: 총 N회 / 총 2분 15초 instead of 합계
     var best = !cardio && !bw && vol !== null && has(info.best) && vol > info.best; // P6: today's 합계 beats every earlier session
     var restOn = S.rest && S.rest.ex === ex.id && S.rest.date === S.date && S.rest.view === S.view;
     var on = S.wu[ex.id] ? ' on' : '', X = esc(ex.id);
     var pu = photoUrl(ex.id);
-    var entry = bw ? // R12 맨몸: [횟수][+무게][메모][추가]; the weight field (weighted pull-ups) is hidden until +무게
+    var entry = hold ? // R15 플랭크 (근력 부위): [초][무게 (선택)][메모][추가], no reps, no warm-up
+      '<div class="entry hold"><input id="s-' + X + '" inputmode="numeric" placeholder="초" autocomplete="off" aria-label="초"' + kv('s') + '>' +
+        '<input class="w" id="w-' + X + '" inputmode="decimal" placeholder="무게 (선택)" autocomplete="off" aria-label="무게"' + kv('w') + '>' +
+        '<input class="note" id="n-' + X + '" placeholder="메모(선택)" autocomplete="off">' +
+        '<button class="primary add" data-act="addset" data-ex="' + X + '">추가</button></div>' :
+      bw ? // R12 맨몸: [횟수][+무게][메모][추가]; the weight field (weighted pull-ups) is hidden until +무게
       '<div class="entry bw"><button class="bwmode" data-act="bwmode" data-ex="' + X + '" aria-label="횟수/초 바꾸기">' + (mode === 'sec' ? '초' : '횟수') + '</button>' +
         '<input id="' + (mode === 'sec' ? 's-' : 'r-') + X + '" inputmode="numeric" placeholder="' + (mode === 'sec' ? '초' : '횟수') + '" autocomplete="off" aria-label="' + (mode === 'sec' ? '초' : '횟수') + '"' + kv(mode === 'sec' ? 's' : 'r') + '>' +
         '<button class="bwbtn' + (S.bww[ex.id] ? ' on' : '') + '" data-act="bwweight" data-ex="' + X + '" aria-pressed="' + (!!S.bww[ex.id]) + '"' + (S.bww[ex.id] ? ' hidden' : '') + '>+무게</button>' +
@@ -296,7 +301,7 @@
         (reps ? '<input id="r-' + X + '" inputmode="numeric" placeholder="횟수" autocomplete="off" aria-label="횟수"' + kv('r') + '>' : '') + // before migration-004 the reps field is hidden (R11 §6)
         '<input class="note" id="n-' + X + '" placeholder="메모(선택)" autocomplete="off">' +
         '<button class="primary add" data-act="addset" data-ex="' + X + '">추가</button></div>' + nudgeHtml('w-' + ex.id, ex.id);
-    var ex1 = bw ? '(15) - (12) - (10)' : reps ? '웜업 - 60(12) - 70(10)' : '웜업 - 60 - 70';
+    var ex1 = hold ? '60초 - 45초' : bw ? '(15) - (12) - (10)' : reps ? '웜업 - 60(12) - 70(10)' : '웜업 - 60 - 70';
     return '<div class="card" data-ex="' + X + '"><div class="row">' + (pu ? '<img class="exthumb" src="' + pu + '" alt="" data-act="zoom" data-ex="' + X + '">' : '') + '<h3 class="grow">' + exName(ex) + badge(ex) + '</h3>' +
       (vol !== null ? '<span class="exvol" data-exvol="' + X + '">합계 ' + esc(GL.fmtVolume(vol)) + '</span>' : '') +
       (best ? '<span class="tag besttag" data-best="' + X + '">최고 경신</span>' : '') +
@@ -304,10 +309,10 @@
       (restOn ? '<span class="muted rest" data-rest="' + X + '">' + restText() + '</span>' : '') +
       '<button class="ghost danger" data-act="delblock" data-ex="' + X + '" aria-label="운동 삭제">🗑</button></div>' + memoHtml(ex) +
       (lastLine ? '<div class="lastline muted" data-last="' + X + '">지난번 ' + esc(lastLine) + '</div>' : '') + rows + entry +
-      '<div class="quick">' + (cardio || bw ? '' : '<button class="bigwu" data-act="addwu" data-ex="' + X + '">웜업 추가</button>') +
+      '<div class="quick">' + (cardio || bw || hold ? '' : '<button class="bigwu" data-act="addwu" data-ex="' + X + '">웜업 추가</button>') +
       '<button data-act="same" data-ex="' + X + '"' + (last ? '' : ' disabled') + '>이전 세트와 같게</button>' +
       '<button data-act="copylast" data-ex="' + X + '"' + (prevSess.length ? '' : ' disabled') + '>지난 기록 복사' + (prevSess.length ? ' (' + prevSess.length + '세트)' : '') + '</button></div>' +
-      (cardio ? '' : '<details><summary>붙여넣기 입력 (예: ' + ex1 + ')</summary><textarea id="p-' + X + '" placeholder="' + ex1 + '&#10;' + (bw ? '(20)' : reps ? '80(8) - 80(6)' : '80 - 80') + '"></textarea>' +
+      (cardio ? '' : '<details><summary>붙여넣기 입력 (예: ' + ex1 + ')</summary><textarea id="p-' + X + '" placeholder="' + ex1 + '&#10;' + (hold ? '90초' : bw ? '(20)' : reps ? '80(8) - 80(6)' : '80 - 80') + '"></textarea>' +
       '<div class="err" id="perr-' + X + '"></div><button data-act="paste" data-ex="' + X + '">붙여넣은 세트 추가</button></details>') + '</div>';
   }
 
@@ -360,7 +365,7 @@
   function memberIdsFor(mem) { return mem === 'all' ? null : [mem]; }
 
   function exercisesWithData() { // strength exercises only (cardio has its own view)
-    return store.growthExercises().filter(function (e) { return e.body_part && !GL.isCardio(e) && ((!e.archived && !e.deleted) || store.seriesFor(e.id, { includeWarmup: true }).length); });
+    return store.growthExercises().filter(function (e) { return e.body_part && !GL.isCardio(e) && ((!e.archived && !e.deleted) || (store.seriesFor(e.id, { includeWarmup: true }).length || store.secondsSeries(e.id).length)); }); // R15: 플랭크 초-only records count
   }
   function shortDate(d) { return d.slice(5).replace('-', '/'); }
 
@@ -422,8 +427,17 @@
         '<label><input type="checkbox" id="gvol"' + (g.vol ? ' checked' : '') + '>합계 그래프</label></div>'; // volume (session 합계) instead of avg/max: different scale, so one or the other
       if (!ex) return html + '<div class="empty">아직 운동이 없어요.</div>';
       var mids = g.mem === 'all' ? store.members(true).map(function (m) { return m.id; }) : [g.mem];
-      var series = [], tables = '';
+      var series = [], tables = '', hold = store.entryKind(ex.id) === 'hold'; // R15 플랭크: 총 시간 per day (seconds total, as 맨몸 blocks), no 평균/합계
       mids.forEach(function (id) {
+        if (hold) {
+          var hs = store.secondsSeries(ex.id, { memberIds: [id], since: rangeOf(g.range).since, until: rangeOf(g.range).until }), hm = store.member(id);
+          if (!hs.length) return;
+          var hp = hs.filter(function (p) { return p.total !== null; });
+          if (hp.length) series.push({ name: hm.name, color: memberColor(id), points: hp.map(function (p) { return { x: p.date, y: p.total }; }) });
+          tables += '<div class="card" data-hold="' + esc(id) + '"><div class="row"><h3 class="grow">' + esc(hm.name) + '</h3></div><table><tr><th>날짜</th><th>세트</th><th>총 시간</th><th>최장</th></tr>' +
+            hs.slice(-10).reverse().map(function (p) { return '<tr><td>' + esc(p.date.slice(2)) + '</td><td>' + p.count + '</td><td>' + (p.total === null ? '-' : esc(GL.fmtDuration(p.total))) + '</td><td>' + (p.max === null ? '-' : esc(GL.fmtDuration(p.max))) + '</td></tr>'; }).join('') + '</table></div>';
+          return;
+        }
         var rb = rangeOf(g.range), oo = { memberIds: [id], includeWarmup: g.wu, since: rb.since, until: rb.until };
         var pts = store.seriesFor(ex.id, oo), vs = store.volumeSeries(ex.id, oo), rows = store.growthRows(ex.id, oo); // volume ignores the warm-up AVERAGE toggle (warm-ups always count); table = union of dates
         if (!rows.length) return;
@@ -440,6 +454,8 @@
       });
       html += '<div class="muted">' + exName(ex) + badge(ex) + '</div>';
       if (!tables) return html + '<div class="empty">' + (g.range === 'all' ? '이 운동의 기록이 없어요.' : '이 기간의 기록이 없어요.') + '</div>';
+      if (hold) return html + '<div class="card" id="chartbox">' + (series.length ? GLChart.line({ series: series, label: ex.name + ' 총 시간(초) 그래프' }) : '<div class="empty">초가 기록된 날이 없어요.</div>') +
+        '<div class="legend">' + series.map(function (s) { return '<span><i style="background:' + s.color + '"></i>' + esc(s.name) + '</span>'; }).join('') + '<span class="muted">세로축 = 하루 총 초</span></div></div>' + tables;
       html += '<div class="card" id="chartbox">' + (series.length ? GLChart.line({ series: series, label: ex.name + (g.vol ? ' 합계' : ' 성장') + ' 그래프' }) : '<div class="empty">' + (g.vol ? '횟수가 기록된 날이 없어서 합계를 그릴 수 없어요.' : '평균을 낼 본 세트가 없어요. (웜업 포함을 켜거나 합계 그래프를 보세요)') + '</div>') + '<div class="legend">' +
         series.filter(function (s) { return !s.dash; }).map(function (s) { return '<span><i style="background:' + s.color + '"></i>' + esc(s.name.replace(' 평균', '').replace(' 합계', '')) + '</span>'; }).join('') +
         (g.vol ? '<span class="muted">합계 = 무게×횟수</span>' : g.max ? '<span class="muted">점선 = 최대</span>' : '') + '</div></div>' + tables;
@@ -526,7 +542,11 @@
     } else if (s.type === 'editset') {
       var st = store.t.sets.get(s.id), ex = store.exercise(st.exercise_id), v0 = function (x) { return esc(has(x) ? x : ''); };
       var legacyDrops = st.drops && st.drops.length && !s.clearDrops; // read-only, clearable (never edited)
-      h = '<h2>' + exName(ex) + badge(ex) + '</h2>' + (GL.isBodyweight(ex) ? // R12 맨몸: 횟수 + optional 무게 + 메모
+      var ehold = store.entryKind(ex.id) === 'hold' && !has(st.reps) && !st.is_warmup; // R15 플랭크: 초 + 무게(선택); old weight-only rows open here too
+      h = '<h2>' + exName(ex) + badge(ex) + '</h2>' + (ehold ?
+        '<div class="entry hold"><input id="es" inputmode="numeric" placeholder="초" aria-label="초" value="' + v0(st.seconds) + '"><input class="w" id="ew" inputmode="decimal" placeholder="무게 (선택)" aria-label="무게" value="' + v0(st.weight) + '">' +
+          '<input class="note" id="en" value="' + esc(st.note) + '" placeholder="메모"></div>' :
+        GL.isBodyweight(ex) ? // R12 맨몸: 횟수 + optional 무게 + 메모
         '<div class="entry bw">' + (has(st.seconds) ? '<input id="es" inputmode="numeric" placeholder="초" aria-label="초" value="' + v0(st.seconds) + '">' : '<input id="er" inputmode="numeric" placeholder="횟수" aria-label="횟수" value="' + v0(st.reps) + '">') + '<input class="w" id="ew" inputmode="decimal" placeholder="무게 (선택)" aria-label="무게" value="' + v0(st.weight) + '">' +
           '<input class="note" id="en" value="' + esc(st.note) + '" placeholder="메모"></div>' :
         GL.isCardio(ex) || has(st.minutes) ?
@@ -653,17 +673,19 @@
   function setErrText(code) {
     return code === 'reps' ? '횟수는 1~1000 사이의 정수로 입력해 주세요.' : code === 'minutes' ? '분은 1~600 사이의 정수로 입력해 주세요.' :
       code === 'distance' ? '거리는 0~300 km 사이의 숫자로 입력해 주세요.' : code === 'drops' ? '드롭 값이 올바르지 않아요.' :
-      code === 'bw' ? '맨몸 운동은 횟수만 기록해요 (웜업 없음).' : code === 'seconds' ? '초는 1~3600 사이의 정수로 입력해 주세요 (횟수와 초 중 하나만).' : '무게를 0 이상의 숫자로 입력해 주세요 (웜업은 무게를 비워도 돼요)';
+      code === 'bw' ? '맨몸 운동은 횟수만 기록해요 (웜업 없음).' : code === 'hold' ? '플랭크는 초로 기록해요 (웜업·드롭 없음).' : code === 'seconds' ? '초는 1~3600 사이의 정수로 입력해 주세요 (횟수와 초 중 하나만).' : '무게를 0 이상의 숫자로 입력해 주세요 (웜업은 무게를 비워도 돼요)';
   }
   // copy helpers (same / copy-last / copy day): the set's own columns; legacy drops are not carried into NEW entries
-  function copyFields(s) { return { weight: s.weight, reps: s.reps, minutes: s.minutes, distance: s.distance, note: s.note, is_warmup: s.is_warmup }; }
-  function addSets(exId, list) {
+  function copyFields(s) { return { weight: s.weight, reps: s.reps, seconds: s.seconds, minutes: s.minutes, distance: s.distance, note: s.note, is_warmup: s.is_warmup }; }
+  function addSets(exId, list, srcs) { // srcs (copies, R15 r2): the source rows; the whole list is checked before anything is written
+    store.validateSets(exId, list, srcs);
     var w = store.getOrCreateWorkout(S.view, S.date);
-    list.forEach(function (f) { store.addSet(w.id, exId, f); });
+    list.forEach(function (f, i) { store.addSet(w.id, exId, f, srcs ? srcs[i] : null); });
     S.draft = S.draft.filter(function (id) { return id !== exId; });
   }
   function readEntry(exId) {
     var ex = store.exercise(exId);
+    if (store.entryKind(exId) === 'hold') return { seconds: $('s-' + exId).value, weight: $('w-' + exId).value, note: $('n-' + exId).value }; // R15
     if (GL.isBodyweight(ex) && (S.bwMode[exId] || store.bwMode(S.view, exId)) === 'sec') return { seconds: $('s-' + exId).value, weight: $('w-' + exId) && !$('w-' + exId).hidden ? $('w-' + exId).value : '', note: $('n-' + exId).value };
     if (GL.isBodyweight(ex)) return { reps: $('r-' + exId).value, weight: $('w-' + exId) && !$('w-' + exId).hidden ? $('w-' + exId).value : '', note: $('n-' + exId).value };
     if ($('m-' + exId)) return { minutes: $('m-' + exId).value, distance: $('k-' + exId).value, note: $('n-' + exId).value };
@@ -693,19 +715,19 @@
     gear: function () { openSheet({ type: 'gear' }); },
     close: function () { closeSheet(); },
     addex: function () { openSheet({ type: 'picker', q: '' }); },
-    pick: function (d) { if (S.draft.indexOf(d.id) < 0) S.draft.push(d.id); closeSheet(); S.focus = 'w-' + d.id; render(); },
+    pick: function (d) { if (S.draft.indexOf(d.id) < 0) S.draft.push(d.id); closeSheet(); S.focus = (store.entryKind(d.id) === 'hold' ? 's-' : 'w-') + d.id; render(); },
     newex: function () {
       if (!S.sheet.bp) { setErr('serr', '부위를 골라 주세요.'); return; }
       var made = guard(function () { return store.addExercise($('nxn').value, S.sheet.bp, $('nxm') ? $('nxm').value : ''); });
       if (!made) return;
       if (GL.suggestBwMode(made.name) === 'sec' && GL.isBodyweight(made)) S.bwMode[made.id] = 'sec'; // 플랭크 / 월싯 / 행잉 start in 초
-      S.draft.push(made.id); closeSheet(); S.focus = 'w-' + made.id; changed();
+      S.draft.push(made.id); closeSheet(); S.focus = (store.entryKind(made.id) === 'hold' ? 's-' : 'w-') + made.id; changed();
     },
     wu: function (d) { S.wu[d.ex] = !S.wu[d.ex]; var b = document.querySelector('.wu[data-ex="' + d.ex + '"]'); b.classList.toggle('on', S.wu[d.ex]); b.setAttribute('aria-pressed', !!S.wu[d.ex]); },
     ewu: function () { $('ewu').classList.toggle('on'); },
     addset: function (d) {
-      var f = readEntry(d.ex), cardio = !!$('m-' + d.ex), kind = GL.kindOf(store.exercise(d.ex)), v = GL.validateSetFields(f, kind === 'str' ? null : kind);
-      var focusOf = { reps: 'r-', seconds: 's-', minutes: 'm-', distance: 'k-' }, first = cardio ? 'm-' : kind === 'bw' ? ((S.bwMode[d.ex] || store.bwMode(S.view, d.ex)) === 'sec' ? 's-' : 'r-') : 'w-'; // R12 r2: 초 has its own field id
+      var f = readEntry(d.ex), cardio = !!$('m-' + d.ex), kind = store.entryKind(d.ex), v = GL.validateSetFields(f, kind === 'str' ? null : kind);
+      var focusOf = { reps: 'r-', seconds: 's-', minutes: 'm-', distance: 'k-' }, first = cardio ? 'm-' : kind === 'hold' ? 's-' : kind === 'bw' ? ((S.bwMode[d.ex] || store.bwMode(S.view, d.ex)) === 'sec' ? 's-' : 'r-') : 'w-'; // R12 r2: 초 has its own field id
       if (!v.ok) { toast(setErrText(v.error)); var fe = $((focusOf[v.error] || first) + d.ex); if (fe) fe.focus(); return; }
       if (guard(function () { addSets(d.ex, [f]); return true; }) === undefined) { toast(humanError(lastGuardErr)); return; }
       S.wu[d.ex] = false; // warm-up toggle applies to one set, then resets
@@ -724,12 +746,12 @@
     same: function (d) {
       var w = store.workoutFor(S.view, S.date), sets = w ? store.setsForWorkout(w.id).filter(function (s) { return s.exercise_id === d.ex; }) : [];
       var last = sets[sets.length - 1]; if (!last) return;
-      if (guard(function () { addSets(d.ex, [copyFields(last)]); return true; }) === undefined) { toast(humanError(lastGuardErr)); return; }
+      if (guard(function () { addSets(d.ex, [copyFields(last)], [last]); return true; }) === undefined) { toast(humanError(lastGuardErr)); return; }
       startRest(d.ex); changed();
     },
     copylast: function (d) {
       var src = store.lastSession(S.view, d.ex, S.date); if (!src.length) return;
-      if (guard(function () { addSets(d.ex, src.map(copyFields)); return true; }) === undefined) { toast(humanError(lastGuardErr)); return; }
+      if (guard(function () { addSets(d.ex, src.map(copyFields), src); return true; }) === undefined) { toast(humanError(lastGuardErr)); return; }
       toast('지난 기록 ' + src.length + '세트를 복사했어요'); changed();
     },
     nudge: function (d) {
@@ -761,7 +783,7 @@
       if (!store.supportsReps() && r.ok.some(function (x) { return x.reps !== null; })) { setErr('perr-' + d.ex, '횟수는 서버 업데이트 후 사용할 수 있어요. 괄호 없이 무게만 써 주세요.'); return; }
       // R12: every set is checked against THIS exercise's kind before anything is written (`(15)` needs a 맨몸 exercise,
       // 맨몸 has no warm-up); one bad set -> nothing written
-      var kind = GL.kindOf(store.exercise(d.ex)), badAt = -1, badV = null;
+      var kind = store.entryKind(d.ex), badAt = -1, badV = null;
       r.ok.some(function (x, i) { var v = GL.validateSetFields(x, kind === 'str' ? null : kind); if (!v.ok) { badAt = i; badV = v; return true; } return false; });
       if (badAt >= 0) { setErr('perr-' + d.ex, (badAt + 1) + '번째 세트: ' + (kind === 'str' && badV.error === 'weight' ? '무게가 없어요. 횟수만 기록하려면 부위를 맨몸으로 만든 운동을 쓰세요.' : setErrText(badV.error))); return; }
       if (guard(function () { addSets(d.ex, r.ok); return true; }, 'perr-' + d.ex) === undefined) return;
@@ -769,7 +791,7 @@
     },
     editset: function (d) {
       var st = store.t.sets.get(d.id), t = function (x) { return has(x) ? String(x) : ''; }; // the values the form is opened with: only edits relative to these are saved
-      openSheet({ type: 'editset', id: d.id, base: st ? { weight: t(st.weight), reps: t(st.reps), minutes: t(st.minutes), distance: t(st.distance), drops: st.drops && st.drops.length ? st.drops.join(',') : '', note: st.note, is_warmup: !!st.is_warmup } : null });
+      openSheet({ type: 'editset', id: d.id, base: st ? { weight: t(st.weight), reps: t(st.reps), seconds: t(st.seconds), minutes: t(st.minutes), distance: t(st.distance), drops: st.drops && st.drops.length ? st.drops.join(',') : '', note: st.note, is_warmup: !!st.is_warmup } : null });
     },
     cleardrops: function () { // in place: no re-render, so what the user typed (weight / reps / memo) stays; the opening base snapshot is untouched
       if (!S.sheet || S.sheet.type !== 'editset') return;

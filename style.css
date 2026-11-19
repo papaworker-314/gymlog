@@ -119,9 +119,9 @@ select.chip { appearance: none; -webkit-appearance: none; padding-right: 16px; }
 .memrow .chip { padding: 0 12px; } /* a little narrower so 3 names + the button fit at 390px */
 .memrow .addexbtn { flex: 1 0 96px; min-width: 96px; min-height: 44px; margin-top: 2px; padding: 0 8px; white-space: nowrap; font-size: 15px; }
 .entry.noreps .w { grid-column: 2 / 4; }
-.entry.cardio { grid-template-columns: 1fr 1fr; }
-.entry.cardio .note { grid-column: 1; }
-.entry.cardio .add { grid-column: 2; }
+.entry.cardio, .entry.hold { grid-template-columns: 1fr 1fr; } /* R15 플랭크 (초 + 무게) shares the 2-column layout */
+.entry.cardio .note, .entry.hold .note { grid-column: 1; }
+.entry.cardio .add, .entry.hold .add { grid-column: 2; }
 .setrow .reps { font-weight: 600; }
 .legacydrop { font-size: 13px; }
 .legacyrow { margin-top: 8px; }
