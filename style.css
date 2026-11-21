@@ -176,3 +176,15 @@ td.goalok { color: var(--ok); font-weight: 700; }
 .mgcard.justadded { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* R14: 기록 tab header (top row + member row) pinned while scrolling; covers the notch area; below the tab bar (5), sheets (20), toasts (30) */
 .stickyhead { position: sticky; top: 0; z-index: 4; background: var(--bg); margin: calc(-1 * (var(--safe-t) + 8px)) -12px 0; padding: calc(var(--safe-t) + 8px) 12px 2px; box-shadow: 0 4px 6px -4px rgba(0,0,0,.18); }
+/* R16: rename button next to the card title; 지난번 line + 최근 5회 button; previous-sessions popup */
+.card .exrename { flex: 0 0 auto; padding: 0 8px; color: var(--muted); }
+.lastrow { display: flex; align-items: center; gap: 8px; margin: 2px 0 6px; }
+.lastrow .lastline { flex: 1 1 auto; min-width: 0; margin: 0; }
+.lastrow .recentbtn { flex: 0 0 auto; font-size: 13px; padding: 0 10px; white-space: nowrap; }
+#recent .rcitem { padding: 8px 0; border-bottom: 1px solid var(--line, rgba(127,127,127,.2)); }
+#recent .rchead { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; }
+#recent .rcdate { font-size: 14px; color: var(--muted); white-space: nowrap; }
+#recent .rctotal { margin-left: auto; font-size: 13px; white-space: nowrap; }
+#recent .rctotal[hidden] { display: none; }
+#recent .rcsets { margin-top: 2px; font-weight: 600; overflow-wrap: anywhere; }
+#recent .rcset { white-space: nowrap; }

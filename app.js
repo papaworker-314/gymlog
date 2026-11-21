@@ -75,10 +75,20 @@
   function signed(v) { return v === null ? '—' : (v > 0 ? '+' : '') + fmt(v); }
   function dateLabel(d) { var p = d.split('-').map(Number); return d + ' (' + DAYS[new Date(p[0], p[1] - 1, p[2]).getDay()] + ')'; }
   function $(id) { return document.getElementById(id); }
+  // R16 popup date: `10/18 (토)`; another year gets its short year in front: `25.10/18 (토)`
+  function recentDate(d) { var p = d.split('-').map(Number); return (String(p[0]) === GL.todayStr().slice(0, 4) ? '' : String(p[0]).slice(2) + '.') + p[1] + '/' + p[2] + ' (' + DAYS[new Date(p[0], p[1] - 1, p[2]).getDay()] + ')'; }
+  // R16: the session total sits on the date line and is shown only when it fits there; otherwise hidden (owner: 합계는 공간 여유 시만)
+  function fitTotals() {
+    Array.prototype.forEach.call(document.querySelectorAll('#recent .rchead'), function (h) {
+      var tot = h.querySelector('.rctotal'); if (!tot) return;
+      tot.hidden = false;
+      tot.hidden = Math.abs(tot.getBoundingClientRect().top - h.querySelector('.rcdate').getBoundingClientRect().top) > 2 || h.scrollWidth > h.clientWidth;
+    });
+  }
 
   // ---------------- read-only (another window holds the writer lease) ----------------
   var WRITE_ACTS = ['addset', 'same', 'copylast', 'paste', 'editset', 'saveset', 'delset', 'delblock', 'delday', 'confirmyes', 'addex', 'pick', 'newex', 'wu', 'ewu',
-    'addwu', 'copyday', 'docopy', 'cleardrops', 'photodel', 'madd', 'mrename', 'marchive', 'eadd', 'esave', 'earchive', 'doimport', 'undo', 'retryrejected', 'retry', 'splityes', 'edelete', 'erestore'];
+    'addwu', 'copyday', 'docopy', 'cleardrops', 'photodel', 'madd', 'mrename', 'marchive', 'eadd', 'esave', 'earchive', 'doimport', 'undo', 'retryrejected', 'retry', 'splityes', 'edelete', 'erestore', 'exrename', 'exrenamesave'];
   function roNow() { return remote && !!auth.current() && !store.writer; }
   function applyRO() {
     var ro = roNow(), b = $('robanner'); if (b) b.hidden = !ro;
@@ -271,6 +281,7 @@
     }).join('');
     var last = sets.length ? sets[sets.length - 1] : null;
     var prevSess = store.lastSession(S.view, ex.id, S.date), info = store.lastInfo(S.view, ex.id, S.date), lastLine = GL.lastLineText(info);
+    var hasRecent = prevSess.length > 0; // R16 r2: any earlier session (also warm-up-only) opens the popup (same day rule as recentSessions)
     var kp = S.keep[ex.id] || {}, kv = function (k) { return has(kp[k]) && kp[k] !== '' ? ' value="' + esc(kp[k]) + '"' : ''; }; // P2: last values stay in the fields
     var mode = S.bwMode[ex.id] || store.bwMode(S.view, ex.id); // pass 2: 횟수 | 초, default = unit of the last set
     var vol = wid && !cardio && !hold ? store.exerciseVolume(wid, ex.id) : null; // running 합계 of this block, from Store data (null for 맨몸)
@@ -303,12 +314,14 @@
         '<button class="primary add" data-act="addset" data-ex="' + X + '">추가</button></div>' + nudgeHtml('w-' + ex.id, ex.id);
     var ex1 = hold ? '60초 - 45초' : bw ? '(15) - (12) - (10)' : reps ? '웜업 - 60(12) - 70(10)' : '웜업 - 60 - 70';
     return '<div class="card" data-ex="' + X + '"><div class="row">' + (pu ? '<img class="exthumb" src="' + pu + '" alt="" data-act="zoom" data-ex="' + X + '">' : '') + '<h3 class="grow">' + exName(ex) + badge(ex) + '</h3>' +
+      '<button class="ghost exrename" data-act="exrename" data-ex="' + X + '" aria-label="운동 이름 수정">✎</button>' + // R16: rename everywhere
       (vol !== null ? '<span class="exvol" data-exvol="' + X + '">합계 ' + esc(GL.fmtVolume(vol)) + '</span>' : '') +
       (best ? '<span class="tag besttag" data-best="' + X + '">최고 경신</span>' : '') +
       (totr ? '<span class="exvol" data-exreps="' + X + '">' + esc(totr) + '</span>' : '') +
       (restOn ? '<span class="muted rest" data-rest="' + X + '">' + restText() + '</span>' : '') +
       '<button class="ghost danger" data-act="delblock" data-ex="' + X + '" aria-label="운동 삭제">🗑</button></div>' + memoHtml(ex) +
-      (lastLine ? '<div class="lastline muted" data-last="' + X + '">지난번 ' + esc(lastLine) + '</div>' : '') + rows + entry +
+      (lastLine || hasRecent ? '<div class="lastrow">' + (lastLine ? '<div class="lastline muted" data-last="' + X + '">지난번 ' + esc(lastLine) + '</div>' : '<div class="lastline"></div>') +
+        (hasRecent ? '<button class="recentbtn" data-act="recent" data-ex="' + X + '">최근 5회</button>' : '') + '</div>' : '') + rows + entry +
       '<div class="quick">' + (cardio || bw || hold ? '' : '<button class="bigwu" data-act="addwu" data-ex="' + X + '">웜업 추가</button>') +
       '<button data-act="same" data-ex="' + X + '"' + (last ? '' : ' disabled') + '>이전 세트와 같게</button>' +
       '<button data-act="copylast" data-ex="' + X + '"' + (prevSess.length ? '' : ' disabled') + '>지난 기록 복사' + (prevSess.length ? ' (' + prevSess.length + '세트)' : '') + '</button></div>' +
@@ -591,6 +604,20 @@
           }).join('') + '</div>';
         }).join('') + '</div>' +
         '<div class="row" style="margin-top:8px"><button class="primary grow" data-act="calgo" data-date="' + esc(s.date) + '">이 날로 가기</button><button class="grow" data-act="calback">달력</button><button class="grow" data-act="close">닫기</button></div>';
+    } else if (s.type === 'exrename') { // R16: rename from the card; sets point at the exercise id, so every record follows
+      var rx = store.exercise(s.id);
+      h = '<h2>운동 이름 수정</h2><p class="muted" id="rnhint">' + esc(rx.body_part) + ' · 이 운동의 모든 날짜 기록(친구 기록 포함)에서 이름이 함께 바뀌어요.</p>' +
+        '<input id="rnn" value="' + esc(rx.name) + '" placeholder="운동 이름" autocomplete="off" aria-label="운동 이름"><div class="err" id="serr"></div>' +
+        '<div class="row" style="margin-top:8px"><button class="primary grow" data-act="exrenamesave" data-id="' + esc(rx.id) + '">저장</button><button class="grow" data-act="close">취소</button></div>';
+    } else if (s.type === 'recent') { // R16: the 5 most recent earlier sessions of one exercise (this member): date + sets, total only when it fits
+      var ry = store.exercise(s.ex), rs = store.recentSessions(S.view, s.ex, S.date, 5);
+      h = '<div id="recent"><h2>' + exName(ry) + ' <span class="muted">최근 ' + rs.length + '회 · ' + esc((store.member(S.view) || {}).name || '') + '</span></h2>' +
+        (rs.length ? rs.map(function (r) {
+          return '<div class="rcitem" data-rdate="' + esc(r.date) + '"><div class="rchead"><span class="rcdate">' + esc(recentDate(r.date)) + '</span>' +
+            (r.total ? '<span class="rctotal muted">' + esc(r.total) + '</span>' : '') + '</div><div class="rcsets">' +
+            r.texts.map(function (x) { return '<span class="rcset">' + esc(x) + '</span>'; }).join(' - ') + '</div></div>';
+        }).join('') : '<p class="muted">이전 기록이 없어요.</p>') + '</div>' +
+        '<button style="width:100%;margin-top:8px" data-act="close">닫기</button>';
     } else if (s.type === 'split') { // R12 section 7: kind change of an exercise with records = archive + recreate
       var sx = store.exercise(s.id);
       h = '<h2>' + esc(sx.name) + ': ' + esc(sx.body_part) + ' → ' + esc(s.patch.body_part) + '</h2><p id="splitq">기존 기록은 그대로 두고 새 종류로 바꿀까요?</p>' +
@@ -633,6 +660,8 @@
     $sheet.innerHTML = '<div class="panel" role="dialog" aria-modal="true">' + h + '</div>';
     $sheet.hidden = false;
     if (s.type === 'exercises' && s.q) filterManage(s.q);
+    if (s.type === 'recent') fitTotals();
+    if (s.type === 'exrename') { var ri = $('rnn'); if (ri) { ri.focus(); ri.select(); } }
     if (s.type === 'exercises' && s.added) { // R14: show + highlight the card just added
       var nc = $sheet.querySelector('#exlist [data-exid="' + s.added + '"]'); if (nc) { nc.classList.add('justadded'); nc.scrollIntoView({ block: 'center' }); }
     }
@@ -709,6 +738,14 @@
       S.date = d.date; S.draft = []; closeSheet(); render();
     },
     calgo: function (d) { S.date = d.date; S.draft = []; closeSheet(); render(); window.scrollTo(0, 0); },
+    exrename: function (d) { openSheet({ type: 'exrename', id: d.ex }); },
+    exrenamesave: function (d) {
+      var r = guard(function () { return store.renameExercise(d.id, $('rnn').value); }); if (!r) return;
+      closeSheet();
+      if (r.changed) toast('이름을 바꿨어요: ' + r.before + ' → ' + r.after); // r3: no undo (a name-text undo could overwrite a newer rename); rename again to go back
+      changed();
+    },
+    recent: function (d) { openSheet({ type: 'recent', ex: d.ex }); },
     calback: function () { var ym = S.sheet && S.sheet.ym || S.date.slice(0, 7); openSheet({ type: 'cal', ym: ym }); },
     dtoday: function () { S.date = GL.todayStr(); S.draft = []; render(); },
     openday: function (d) { S.date = d.date; S.draft = []; render(); window.scrollTo(0, 0); },
@@ -970,8 +1007,13 @@
     else if (id === 'gdist') { S.g.dist = ev.target.checked; render(); }
     else if (id === 'gcex') { S.g.cExId = ev.target.value; render(); }
   });
+  window.addEventListener('resize', function () { if (S.sheet && S.sheet.type === 'recent') fitTotals(); }); // R16: rotation / width change
   document.addEventListener('keydown', function (ev) {
     if (ev.key === 'Escape' && S.sheet) { if (!addBox(false)) closeSheet(); } // R14: Esc closes the open add form first
+    if (ev.key === 'Enter' && ev.target.id === 'rnn' && S.sheet && S.sheet.type === 'exrename') { // R16 r2: never while a Korean candidate is composing; same path as tapping 저장
+      if (ev.isComposing || ev.keyCode === 229) return;
+      ev.preventDefault(); var sb = $sheet.querySelector('[data-act=exrenamesave]'); if (sb && !sb.disabled) sb.click(); return;
+    }
     if (ev.key === 'Enter' && ev.target.matches && ev.target.matches('.entry input')) {
       var card = ev.target.closest('.card'); // the edit sheet has no card: Enter there saves the edit
       var b = card && card.querySelector('[data-act="addset"]'); if (b) b.click();

@@ -1187,17 +1187,29 @@
   };
   // R12 day popup: [{part, items: [{exercise, sets, texts, total}]}] grouped by body part (BODY_PARTS order), blocks in
   // logged order inside a part; total = `합계 1,420` (strength, '' when nothing countable) / `총 45회` (맨몸) / `총 30분 · 5.2km` (cardio)
+  // one exercise's sets of one day -> its total text: 합계 (strength, '' without reps) · 총 N회 / 총 1분 45초 (맨몸, 플랭크) · 총 30분 · 5km (유산소)
+  Store.prototype._sessionTotal = function (exerciseId, sets) {
+    var k = this.entryKind(exerciseId);
+    if (k === 'bw' || k === 'hold') return bwTotalText(sets);
+    if (k === 'cardio') {
+      var mi = 0, km = null; sets.forEach(function (x) { if (has(x.minutes)) mi += x.minutes; if (has(x.distance)) km = (km || 0) + x.distance; });
+      return '총 ' + fmtNum(Math.round(mi * 1000) / 1000) + '분' + (km === null ? '' : ' · ' + fmtNum(Math.round(km * 1000) / 1000) + 'km');
+    }
+    var v = volumeOf(sets); return v === null ? '' : '합계 ' + fmtVolume(v);
+  };
+  // R16: the n (default 5) most recent sessions of this exercise for this member BEFORE `beforeDate`, newest first:
+  // [{date, sets (ascending, warm-ups included), texts (app format), total}]. Same live-set rules as the 지난번 line.
+  Store.prototype.recentSessions = function (memberId, exerciseId, beforeDate, n) {
+    var days = this._exDays(memberId, exerciseId), self = this;
+    return Object.keys(days).filter(function (d) { return d < beforeDate; }).sort().reverse().slice(0, n || 5).map(function (d) {
+      return { date: d, sets: days[d], texts: days[d].map(displaySet), total: self._sessionTotal(exerciseId, days[d]) };
+    });
+  };
   Store.prototype.dayDetail = function (memberId, date) {
     var w = this.workoutFor(memberId, date); if (!w) return [];
     var groups = {}, self = this;
     this.blocksForWorkout(w.id).forEach(function (b) {
-      var k = self.entryKind(b.exercise.id), total = '';
-      if (k === 'bw' || k === 'hold') total = bwTotalText(b.sets);
-      else if (k === 'cardio') {
-        var mi = 0, km = null; b.sets.forEach(function (x) { if (has(x.minutes)) mi += x.minutes; if (has(x.distance)) km = (km || 0) + x.distance; });
-        total = '총 ' + fmtNum(Math.round(mi * 1000) / 1000) + '분' + (km === null ? '' : ' · ' + fmtNum(Math.round(km * 1000) / 1000) + 'km');
-      } else { var v = volumeOf(b.sets); total = v === null ? '' : '합계 ' + fmtVolume(v); }
-      (groups[b.exercise.body_part] = groups[b.exercise.body_part] || []).push({ exercise: b.exercise, sets: b.sets, texts: b.sets.map(displaySet), total: total });
+      (groups[b.exercise.body_part] = groups[b.exercise.body_part] || []).push({ exercise: b.exercise, sets: b.sets, texts: b.sets.map(displaySet), total: self._sessionTotal(b.exercise.id, b.sets) });
     });
     return BODY_PARTS.filter(function (p) { return groups[p]; }).map(function (p) { return { part: p, items: groups[p] }; });
   };
@@ -1465,6 +1477,15 @@
       if (m !== (e.memo || '')) { if (!this.supportsMemo()) throw new Error('memo unsupported'); n.memo = m; }
     }
     return this._commit('exercises', n);
+  };
+  // R16: rename from the exercise card. Sets point at the exercise id, so this one row change renames every record of every
+  // member (one PATCH of {name}); a live same-name exercise in the same body part refuses it (updateExercise), nothing written.
+  Store.prototype.renameExercise = function (id, name) {
+    var e = this.exercise(id); if (!e) throw new Error('no exercise');
+    var after = cleanName(name);
+    if (after === e.name) return { id: id, before: e.name, after: after, changed: false };
+    this.updateExercise(id, { name: after });
+    return { id: id, before: e.name, after: after, changed: true };
   };
   Store.prototype.seedExercisesIfFirstRun = function () {
     if (this.a.remote || this.kv.getItem('gl:seeded') || this.t.exercises.size) return false; // server data is seeded by the owner
